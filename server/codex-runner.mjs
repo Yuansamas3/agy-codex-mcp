@@ -2,7 +2,7 @@ import { execFile, spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync, statSync, unlinkSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import {
   composeOutboundUserPayload,
@@ -208,10 +208,11 @@ export class CodexRunner {
     try {
       if (existsSync(this.cacheFile)) {
         const raw = JSON.parse(readFileSync(this.cacheFile, 'utf8'));
-        if (raw?.path && existsSync(raw.path)) {
+        // Require non-empty `version` so broken/ACL-locked WindowsApps paths are re-probed cleanly
+        if (raw?.path && raw?.version && existsSync(raw.path)) {
           return {
             path: String(raw.path),
-            version: raw.version ? String(raw.version) : null,
+            version: String(raw.version),
             detectedAt: Number(raw.detectedAt) || Date.now(),
           };
         }
@@ -282,9 +283,62 @@ export class CodexRunner {
 
     if (this._probePromise) return this._probePromise;
     this._probePromise = (async () => {
-      let found = null;
+      const candidates = [];
+      const pushCandidate = (p) => {
+        const s = String(p || '').trim();
+        if (s && !candidates.includes(s) && existsSync(s)) {
+          candidates.push(s);
+        }
+      };
 
       if (process.platform === 'win32') {
+        const addNpmVendorCandidatesFromPrefix = (prefixDir) => {
+          if (!prefixDir) return;
+          const pkgRoot = join(prefixDir, 'node_modules', '@openai', 'codex');
+          const triples = ['x86_64-pc-windows-msvc', 'aarch64-pc-windows-msvc'];
+          for (const t of triples) {
+            pushCandidate(join(pkgRoot, 'vendor', t, 'codex', 'codex.exe'));
+            // Newer @openai/codex optional platform subpackages
+            pushCandidate(
+              join(prefixDir, 'node_modules', '@openai', `codex-win32-${t.startsWith('aarch64') ? 'arm64' : 'x64'}`, 'vendor', t, 'codex', 'codex.exe')
+            );
+            pushCandidate(
+              join(pkgRoot, 'node_modules', '@openai', `codex-win32-${t.startsWith('aarch64') ? 'arm64' : 'x64'}`, 'vendor', t, 'codex', 'codex.exe')
+            );
+          }
+        };
+
+        // 1. Prefer standalone CLI (`npm i -g @openai/codex` native vendor binary or direct codex.exe on PATH)
+        try {
+          const { stdout } = await execFileAsync('where.exe', ['codex'], {
+            encoding: 'utf8',
+            timeout: 4_000,
+            windowsHide: true,
+          });
+          const lines = (stdout || '').split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+          for (const hit of lines) {
+            if (/\.exe$/i.test(hit)) {
+              pushCandidate(hit);
+            } else {
+              addNpmVendorCandidatesFromPrefix(dirname(hit));
+            }
+          }
+        } catch {
+          // ignore
+        }
+
+        const appData = process.env.APPDATA || '';
+        const localAppData = process.env.LOCALAPPDATA || '';
+        addNpmVendorCandidatesFromPrefix(dirname(process.execPath));
+        if (appData) {
+          addNpmVendorCandidatesFromPrefix(join(appData, 'npm'));
+          pushCandidate(join(appData, 'npm', 'codex.exe'));
+        }
+        if (localAppData) {
+          pushCandidate(join(localAppData, 'Programs', 'codex', 'codex.exe'));
+        }
+
+        // 2. Microsoft Store `OpenAI.Codex` package (`WindowsApps\...\codex.exe`)
         try {
           const { stdout } = await execFileAsync(
             'powershell.exe',
@@ -298,41 +352,10 @@ export class CodexRunner {
           );
           const loc = (stdout || '').trim();
           if (loc) {
-            const candidate = join(loc, 'app', 'resources', 'codex.exe');
-            if (existsSync(candidate)) found = candidate;
+            pushCandidate(join(loc, 'app', 'resources', 'codex.exe'));
           }
         } catch {
           // ignore
-        }
-
-        if (!found) {
-          try {
-            const { stdout } = await execFileAsync('where.exe', ['codex'], {
-              encoding: 'utf8',
-              timeout: 4_000,
-              windowsHide: true,
-            });
-            const first = (stdout || '').split(/\r?\n/).map((s) => s.trim()).find(Boolean);
-            if (first && existsSync(first)) found = first;
-          } catch {
-            // ignore
-          }
-        }
-
-        if (!found) {
-          const appData = process.env.APPDATA || '';
-          const localAppData = process.env.LOCALAPPDATA || '';
-          const winCandidates = [
-            appData ? join(appData, 'npm', 'codex.cmd') : '',
-            appData ? join(appData, 'npm', 'codex.exe') : '',
-            localAppData ? join(localAppData, 'Programs', 'codex', 'codex.exe') : '',
-          ].filter(Boolean);
-          for (const c of winCandidates) {
-            if (existsSync(c)) {
-              found = c;
-              break;
-            }
-          }
         }
       } else {
         try {
@@ -341,34 +364,39 @@ export class CodexRunner {
             timeout: 4_000,
           });
           const first = (stdout || '').split(/\r?\n/).map((s) => s.trim()).find(Boolean);
-          if (first && existsSync(first)) found = first;
+          pushCandidate(first);
         } catch {
           // ignore
         }
 
-        if (!found) {
-          const home = homedir();
-          const posixCandidates = [
-            '/opt/homebrew/bin/codex',
-            '/usr/local/bin/codex',
-            '/usr/bin/codex',
-            join(home, '.local', 'bin', 'codex'),
-            join(home, '.npm-global', 'bin', 'codex'),
-            '/Applications/Codex.app/Contents/Resources/codex',
-          ];
-          for (const c of posixCandidates) {
-            if (existsSync(c)) {
-              found = c;
-              break;
-            }
-          }
+        const home = homedir();
+        for (const c of [
+          '/opt/homebrew/bin/codex',
+          '/usr/local/bin/codex',
+          '/usr/bin/codex',
+          join(home, '.local', 'bin', 'codex'),
+          join(home, '.npm-global', 'bin', 'codex'),
+          '/Applications/Codex.app/Contents/Resources/codex',
+        ]) {
+          pushCandidate(c);
         }
       }
 
-      const version = found ? await this._probeBinaryVersion(found) : null;
+      // Verify candidate actually executes `--version` (skips ACL-locked WindowsApps binaries!)
+      let found = null;
+      let version = null;
+      for (const cand of candidates) {
+        const ver = await this._probeBinaryVersion(cand);
+        if (ver) {
+          found = cand;
+          version = ver;
+          break;
+        }
+      }
+
       const next = { path: found, version, detectedAt: Date.now() };
       this._binCache = next;
-      if (found) this._saveDiskCache(next);
+      if (found && version) this._saveDiskCache(next);
       return next;
     })().finally(() => {
       this._probePromise = null;
