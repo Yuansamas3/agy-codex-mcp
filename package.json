@@ -1,8 +1,12 @@
 {
-  "name": "sidedesk",
+  "name": "agy-codex-mcp",
   "version": "0.1.0",
   "private": false,
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Yuansamas3/agy-codex-mcp.git"
+  },
   "type": "module",
   "description": "SideDesk · 副席：Antigravity MCP App 双引擎侧边工坊（本机 Codex CLI + OpenAI 兼容 API），全任务影子副本隔离、红绿 Diff 验收与一键撤销。",
   "scripts": {

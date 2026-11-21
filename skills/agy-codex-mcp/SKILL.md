@@ -1,10 +1,10 @@
 ---
-name: sidedesk
+name: agy-codex-mcp
 description: >-
   Delegate backend architecture review, complex backend coding/refactoring, and
   code auditing to dual-engine SideDesk · 副席 personas (local Codex CLI or
   OpenAI-compatible HTTP APIs such as DeepSeek / OpenRouter / Ollama) via the
-  `sidedesk_sidedesk` MCP App. By default edits run inside an isolated shadow
+  `agy-codex-mcp_sidedesk` MCP App. By default edits run inside an isolated shadow
   workspace (`read-only` / `workspace-write`) so the original project stays
   untouched until the user reviews the red/green Diff and clicks Apply; an
   opt-in `turbo-direct` mode is also available when explicitly requested by the
@@ -16,7 +16,7 @@ description: >-
 
 # SideDesk · 副席 操作指南
 
-本插件通过 MCP Server `sidedesk_sidedesk` 在 Antigravity 右侧 `aux_pane` 提供双引擎副席工坊，支持：
+本插件通过 MCP Server `agy-codex-mcp_sidedesk` 在 Antigravity 右侧 `aux_pane` 提供双引擎副席工坊，支持：
 - **本机 Codex CLI**（动态探测商店版 `codex.exe`，异步预热缓存 0ms 响应，45s 冷启动超时看门狗）
 - **通用 OpenAI 兼容 HTTP API**（DeepSeek / OpenRouter / Ollama / LM Studio 等，支持 SSE 流式思考链 `reasoning_content` 与工具调用循环）
 
@@ -27,7 +27,7 @@ description: >-
 
 右侧面板提供 1v1 独立单聊工位（我的个人资料称呼注入、附图发送、话题压缩摘要继承/解绑与 `⋯` 话题管理）。
 
-## 可用 Model 工具（Server: `sidedesk_sidedesk`）
+## 可用 Model 工具（Server: `agy-codex-mcp_sidedesk`）
 
 1. **`sidedesk_open`**：打开或刷新右侧「SideDesk · 副席」辅助栏（支持空参数 `{}` 或 `{ sessionId }`）。
 2. **`sidedesk_list_personas`**：列出当前配置的人物卡（含 `provider`、`model`、`defaultSandbox` 与 `toolMode`，严禁且永不返回任何 API Key）。

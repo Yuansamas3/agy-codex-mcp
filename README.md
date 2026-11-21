@@ -1,4 +1,4 @@
-# SideDesk · 副席 (`v0.1.0`)
+# agy-codex-mcp · SideDesk 副席 (`v0.1.0`)
 
 基于 Google Antigravity 原生 **MCP App (`aux_pane`)** 规范构建的轻量级右侧 1v1 副工位插件。支持接入本机官方 **OpenAI Codex CLI** 或任意标准 **OpenAI 兼容 HTTP API**（DeepSeek / OpenRouter / SiliconFlow / 本地 Ollama 等），默认在物理隔离的影子副本中执行文件修改，经红绿 Unified Diff 审阅确认后再安全写回原目录。
 
@@ -43,15 +43,15 @@
 
 **Windows (PowerShell)：**
 ```powershell
-git clone https://github.com/Yuansamas3/sidedesk.git "$HOME\.gemini\config\plugins\sidedesk"
-cd "$HOME\.gemini\config\plugins\sidedesk"
+git clone https://github.com/Yuansamas3/agy-codex-mcp.git "$HOME\.gemini\config\plugins\agy-codex-mcp"
+cd "$HOME\.gemini\config\plugins\agy-codex-mcp"
 npm install
 ```
 
 **macOS / Linux：**
 ```bash
-git clone https://github.com/Yuansamas3/sidedesk.git ~/.gemini/config/plugins/sidedesk
-cd ~/.gemini/config/plugins/sidedesk
+git clone https://github.com/Yuansamas3/agy-codex-mcp.git ~/.gemini/config/plugins/agy-codex-mcp
+cd ~/.gemini/config/plugins/agy-codex-mcp
 chmod +x bin/launch.sh
 npm install
 ```
@@ -68,12 +68,12 @@ npm install
 > ```
 
 ### 2. 打开面板
-安装依赖后，在 Antigravity 的 **MCP Servers** 设置中刷新/重启 `sidedesk_sidedesk`，或直接在主对话中输入：
+安装依赖后，在 Antigravity 的 **MCP Servers** 设置中刷新/重启 `agy-codex-mcp_sidedesk`，或直接在主对话中输入：
 > `打开 SideDesk 副席面板`
 
 即可在对话右侧辅助栏呼出工位面板。
 
-*(小贴士：如果不希望影子副本占用系统盘空间，可将插件目录与 `~/.gemini/antigravity/plugin_data/sidedesk` 通过系统目录联接 `Junction` / 软链接指向其他大容量磁盘分区。)*
+*(小贴士：如果不希望影子副本占用系统盘空间，可将插件目录与 `~/.gemini/antigravity/plugin_data/agy-codex-mcp` 通过系统目录联接 `Junction` / 软链接指向其他大容量磁盘分区。)*
 
 ---
 

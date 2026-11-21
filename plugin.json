@@ -1,5 +1,5 @@
 {
-  "name": "sidedesk",
+  "name": "agy-codex-mcp",
   "displayName": "SideDesk · 副席",
   "version": "0.1.0",
   "description": "Antigravity 双引擎 1v1 副席工坊：支持本机 Codex CLI 与通用 OpenAI 兼容 API（DeepSeek / OpenRouter / Ollama 等），提供 1v1 聊天室工位、三组权限胶囊与 Turbo 直通、话题压缩摘要继承、附图发送、红绿 Diff 验收与一键撤销。",
