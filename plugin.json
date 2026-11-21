@@ -1,0 +1,12 @@
+{
+  "name": "sidedesk",
+  "displayName": "SideDesk · 副席",
+  "version": "0.1.0",
+  "description": "Antigravity 双引擎 1v1 副席工坊：支持本机 Codex CLI 与通用 OpenAI 兼容 API（DeepSeek / OpenRouter / Ollama 等），提供 1v1 聊天室工位、三组权限胶囊与 Turbo 直通、话题压缩摘要继承、附图发送、红绿 Diff 验收与一键撤销。",
+  "logo": "assets/logo.svg",
+  "suggestedPrompts": [
+    "打开 SideDesk · 副席，检查人物卡与双引擎连接状态",
+    "在影子副本中审计当前项目的后端代码并给出红绿 Diff",
+    "查看待验收的影子副本改动，帮我把关后再决定是否应用到原目录"
+  ]
+}

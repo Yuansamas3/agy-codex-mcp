@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "sidedesk": {
+      "command": "cmd",
+      "args": [
+        "/d",
+        "/c",
+        "${PLUGIN_ROOT}/bin/launch.cmd",
+        "--data_dir=${PLUGIN_DATA}"
+      ]
+    }
+  }
+}

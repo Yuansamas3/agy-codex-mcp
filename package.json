@@ -1,0 +1,22 @@
+{
+  "name": "sidedesk",
+  "version": "0.1.0",
+  "private": false,
+  "license": "MIT",
+  "type": "module",
+  "description": "SideDesk · 副席：Antigravity MCP App 双引擎侧边工坊（本机 Codex CLI + OpenAI 兼容 API），全任务影子副本隔离、红绿 Diff 验收与一键撤销。",
+  "scripts": {
+    "start": "node server/index.mjs",
+    "build:app": "node app/build.mjs",
+    "test:e2e": "node server/test-e2e.mjs",
+    "verify:app": "node app/verify-app.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/ext-apps": "^1.0.0",
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  }
+}

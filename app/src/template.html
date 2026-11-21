@@ -1,0 +1,701 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SideDesk · 副席</title>
+  <style>/*__INLINE_CSS__*/</style>
+</head>
+<body>
+  <div class="shell">
+    <!-- Clean Parchment Workstation Header -->
+    <header class="topbar">
+      <!-- Row 1: Underline Mode Tabs + Emergency Trip + Settings -->
+      <div class="topbar-nav">
+        <div class="view-tabs" role="tablist">
+          <button id="tab-station" class="vtab active" type="button" role="tab">工位</button>
+          <button id="tab-review" class="vtab" type="button" role="tab">
+            <span>待验收</span>
+            <span id="pending-pill" class="count-pill">0</span>
+          </button>
+        </div>
+        <div class="topbar-actions">
+          <button id="btn-emergency-trip" class="btn-trip hidden" type="button" title="全局急停熔断（防误触：点两次立即全停）"></button>
+          <button id="btn-theme-toggle" class="btn-theme-icon" type="button" title="切换明暗主题" aria-label="切换明暗主题">
+            <svg class="icon-moon" viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.2 9.8A5.4 5.4 0 0 1 6.2 2.8a5.5 5.5 0 1 0 7 7Z"/></svg>
+            <svg class="icon-sun hidden" viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="2.8"/><path d="M8 1.8v1.4M8 12.8v1.4M1.8 8h1.4M12.8 8h1.4M3.6 3.6l1 1M11.4 11.4l1 1M12.4 3.6l-1 1M4.6 11.4l-1 1"/></svg>
+          </button>
+          <button id="btn-settings" class="btn-icon-text" type="button" title="设置人物卡、我的资料与默认权限">
+            <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="8" r="2.2"/><path d="M13.2 8a5.2 5.2 0 0 0-.08-.9l1.34-1.04-1.26-2.18-1.6.64a5.2 5.2 0 0 0-1.56-.9L9.8 1.9H7.28l-.24 1.72a5.2 5.2 0 0 0-1.56.9l-1.6-.64-1.26 2.18L3.96 7.1a5.4 5.4 0 0 0 0 1.8L2.62 9.94l1.26 2.18 1.6-.64a5.2 5.2 0 0 0 1.56.9l.24 1.72H9.8l.24-1.72a5.2 5.2 0 0 0 1.56-.9l1.6.64 1.26-2.18-1.34-1.04c.05-.3.08-.6.08-.9Z"/></svg>
+            <span>设置</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Row 2: Dedicated Member Avatar Strip + Engine Status -->
+      <div class="topbar-members">
+        <div id="member-strip" class="member-strip" role="list" aria-label="切换副席成员"></div>
+        <span class="engine-status" id="engine-status" title="引擎连接状态">
+          <span id="status-dot" class="dot"></span>
+          <span id="status-text">就绪</span>
+        </span>
+      </div>
+
+      <!-- Row 3: Plain-language Workspace Path Subtitle + Switch Folder -->
+      <div class="path-row">
+        <span id="path-summary" class="path-summary" title="点击右侧切换工作文件夹">影子隔离：未绑定文件夹 · 验收后写回</span>
+        <button id="btn-dir-toggle" class="btn-link" type="button">切换文件夹</button>
+      </div>
+
+      <!-- Collapsible Folder Picker Drawer -->
+      <div id="dir-drawer" class="dir-drawer hidden">
+        <div class="dir-drawer-row">
+          <input id="input-source-dir" class="input-compact input-mono" placeholder="输入工作目录绝对路径，如 D:\project" />
+          <button id="btn-dir-save" class="btn btn-xs btn-primary" type="button">确定</button>
+        </div>
+        <div id="recent-dirs" class="recent-dirs"></div>
+      </div>
+    </header>
+
+    <!-- View 1: 1v1 Station Chatroom -->
+    <section id="view-station" class="view-pane">
+      <!-- Slim Topic Bar -->
+      <div class="topic-bar">
+        <div class="topic-select-wrap">
+          <select id="ctrl-session" class="topic-select" aria-label="切换当前成员话题"></select>
+        </div>
+        <button id="btn-new-topic" class="btn-ghost-sm" type="button" title="归档当前话题并开启新话题">+ 开新话题</button>
+        <button id="btn-topic-mgr" class="btn-icon-sq" type="button" title="话题管理（改名、压缩、导出、删除）" aria-label="话题管理">
+          <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor" aria-hidden="true"><circle cx="3.5" cy="8" r="1.2"/><circle cx="8" cy="8" r="1.2"/><circle cx="12.5" cy="8" r="1.2"/></svg>
+        </button>
+      </div>
+
+      <!-- Inherited Summary Strip (Parchment accent-soft + 3px accent left rule) -->
+      <div id="inherited-bar" class="inherited-bar hidden">
+        <div class="inherited-head">
+          <details id="inherited-fold" class="inherited-fold">
+            <summary id="inherited-summary-title">延续上一话题的摘要</summary>
+            <div class="inherited-editor-wrap">
+              <textarea id="inherited-editor" class="inherited-textarea" rows="4"></textarea>
+              <div class="inherited-editor-actions">
+                <button id="btn-save-inherited" class="btn btn-xs btn-primary" type="button">保存修改</button>
+              </div>
+            </div>
+          </details>
+          <button id="btn-clear-inherited" class="btn-warm-xs" type="button" title="移除后后续轮次不再注入这段摘要">不再延续</button>
+        </div>
+      </div>
+
+      <!-- Chat Message Stream (on --surface) -->
+      <div id="station-scroll" class="scroll-area chat-stream">
+        <div id="needs-review-banner" class="banner warn hidden"></div>
+        <div id="station-empty" class="empty-box">
+          <div id="empty-avatar" class="avatar-circle xl">🧪</div>
+          <div id="empty-title" class="empty-title">准备就绪</div>
+          <div id="empty-sub" class="empty-sub">
+            先确认上方工作文件夹，即可开始 1v1 对话；<br />
+            也可在左侧主对话随时通过 MCP 派单协作。
+          </div>
+        </div>
+        <div id="msg-list" class="msg-list"></div>
+        <div id="live-slot"></div>
+      </div>
+
+      <!-- Bottom Integrated Rounded Composer Capsule -->
+      <footer class="composer-wrap">
+        <!-- Popover: Attach Menu -->
+        <div id="attach-popover" class="floating-pop attach-pop hidden" role="menu">
+          <button id="btn-attach-file" class="pop-item" type="button">
+            <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="12" height="10" rx="2"/><circle cx="5.8" cy="6.5" r="1"/><path d="m14 10.5-3.2-3.2L5 13"/></svg>
+            <span>选择本地图片</span>
+          </button>
+          <button id="btn-attach-clip" class="pop-item" type="button">
+            <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="2" width="6" height="2.5" rx="1"/><path d="M5 3.5H4a1.5 1.5 0 0 0-1.5 1.5v7.5A1.5 1.5 0 0 0 4 14h8a1.5 1.5 0 0 0 1.5-1.5V5A1.5 1.5 0 0 0 12 3.5h-1"/></svg>
+            <span>粘贴剪贴板截图</span>
+          </button>
+        </div>
+
+        <!-- Popover: Quick Round Params & 3-Group Permission Capsules -->
+        <div id="params-popover" class="floating-pop params-pop hidden" role="dialog" aria-label="本轮参数与权限">
+          <div class="pop-head">
+            <span class="pop-title">本轮运行参数</span>
+            <button id="btn-params-reset" class="btn-link" type="button">恢复成员默认</button>
+          </div>
+
+          <div id="pop-codex-row" class="field-grid field-grid-model">
+            <div class="field">
+              <label for="ctrl-model">模型</label>
+              <select id="ctrl-model" class="select-compact"></select>
+            </div>
+            <div class="field">
+              <label for="ctrl-effort">思考深度</label>
+              <select id="ctrl-effort" class="select-compact">
+                <option value="low">low</option>
+                <option value="medium">medium</option>
+                <option value="high">high</option>
+                <option value="xhigh">xhigh</option>
+                <option value="max">max</option>
+                <option value="ultra">ultra</option>
+              </select>
+            </div>
+          </div>
+
+          <label id="pop-codex-fast-row" class="toggle-line">
+            <input id="ctrl-fast-mode" type="checkbox" class="switch-input" />
+            <span class="toggle-line-text">
+              <b>⚡ 闪电加速</b>
+              <span class="toggle-line-hint">开启后 2x 极速输出，但会增加订阅额度消耗</span>
+            </span>
+          </label>
+
+          <div id="pop-api-row" class="api-pop-note hidden">
+            <span id="pop-api-model"></span>
+          </div>
+
+          <div class="preset-row">
+            <button type="button" class="preset-btn" data-preset-scope="composer" data-preset="safe">🛡️ 安全隔离默认</button>
+            <button type="button" class="preset-btn preset-turbo" data-preset-scope="composer" data-preset="turbo">⚡ Turbo 全开直通</button>
+          </div>
+
+          <div class="perm-stack" data-perm-group="composer">
+            <div class="perm-row">
+              <span class="perm-lbl">文件范围</span>
+              <div class="seg-group" data-perm-key="fileScope">
+                <button type="button" class="seg-btn" data-val="read-only">只读</button>
+                <button type="button" class="seg-btn" data-val="shadow">影子隔离</button>
+                <button type="button" class="seg-btn seg-turbo" data-val="direct">原目录不限</button>
+              </div>
+            </div>
+            <div class="perm-row">
+              <span class="perm-lbl">执行命令</span>
+              <div class="seg-group" data-perm-key="commandPolicy">
+                <button type="button" class="seg-btn" data-val="auto">自动执行</button>
+                <button type="button" class="seg-btn" data-val="disabled">禁止</button>
+              </div>
+            </div>
+            <div class="perm-row">
+              <span class="perm-lbl">联网</span>
+              <div class="seg-group" data-perm-key="networkPolicy">
+                <button type="button" class="seg-btn" data-val="allow">允许</button>
+                <button type="button" class="seg-btn" data-val="deny">禁止</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Popover: Codex Subscription Quota & Topic Context Window -->
+        <div id="quota-popover" class="floating-pop quota-pop hidden" role="dialog" aria-label="配额与上下文详情">
+          <div class="pop-head">
+            <span id="quota-pop-title" class="pop-title">配额与上下文</span>
+            <span id="quota-pop-ts" class="quota-pop-ts"></span>
+          </div>
+
+          <div id="quota-codex-section" class="quota-section">
+            <div id="quota-codex-metrics" class="quota-metrics">
+              <div id="quota-5h-block" class="quota-metric">
+                <div class="quota-metric-row">
+                  <span class="quota-metric-lbl">5 小时窗口</span>
+                  <span id="quota-5h-val" class="quota-metric-val">剩余 --</span>
+                </div>
+                <div class="quota-bar-track">
+                  <div id="quota-5h-bar" class="quota-bar-fill"></div>
+                </div>
+                <div id="quota-5h-sub" class="quota-metric-sub"></div>
+              </div>
+
+              <div id="quota-7d-block" class="quota-metric">
+                <div class="quota-metric-row">
+                  <span class="quota-metric-lbl">7 天周配额</span>
+                  <span id="quota-7d-val" class="quota-metric-val">剩余 --</span>
+                </div>
+                <div class="quota-bar-track">
+                  <div id="quota-7d-bar" class="quota-bar-fill"></div>
+                </div>
+                <div id="quota-7d-sub" class="quota-metric-sub"></div>
+              </div>
+            </div>
+
+            <div id="quota-codex-empty" class="quota-empty-note hidden">
+              尚未检测到本地 Codex 配额快照（完成一次 Codex 对话后自动生成，零网络开销）。
+            </div>
+
+            <div class="quota-foot-row">
+              <span id="quota-plan-label" class="quota-plan-label">本地快照</span>
+              <button id="btn-quota-refresh" class="btn-link quota-refresh-btn" type="button">刷新本地快照</button>
+            </div>
+          </div>
+
+          <div id="quota-context-section" class="quota-section">
+            <div class="quota-metric">
+              <div class="quota-metric-row">
+                <span id="quota-ctx-lbl" class="quota-metric-lbl">当前话题上下文</span>
+                <span id="quota-ctx-val" class="quota-metric-val">暂无统计</span>
+              </div>
+              <div class="quota-bar-track">
+                <div id="quota-ctx-bar" class="quota-bar-fill"></div>
+              </div>
+              <div id="quota-ctx-sub" class="quota-metric-sub">发送消息后自动统计本话题上下文水位</div>
+            </div>
+
+            <div id="quota-compress-nudge" class="quota-nudge hidden">
+              <button id="btn-quota-compress" class="quota-nudge-btn" type="button">上下文较长，点此压缩摘要减负 →</button>
+            </div>
+          </div>
+        </div>
+
+        <input id="composer-img-file" type="file" accept="image/*" multiple class="hidden" />
+
+        <div class="composer-meta-row">
+          <button
+            id="btn-quota-pill"
+            class="quota-pill is-muted"
+            type="button"
+            aria-haspopup="dialog"
+            aria-expanded="false"
+            title="点击查看配额与当前话题上下文详情"
+          >
+            <span id="quota-pill-dot" class="quota-dot" aria-hidden="true"></span>
+            <span id="quota-pill-text" class="quota-pill-text">上下文 0%</span>
+            <span class="quota-pill-filament" aria-hidden="true">
+              <span id="quota-pill-fill" class="quota-pill-fill"></span>
+            </span>
+          </button>
+        </div>
+
+        <div class="composer-shell">
+          <div id="attach-strip" class="attach-strip hidden"></div>
+          <textarea
+            id="draft-input"
+            class="composer-textarea"
+            rows="2"
+            placeholder="写下问题或要求... Enter 发送，Shift + Enter 换行"
+          ></textarea>
+          <div class="composer-bar">
+            <div class="composer-bar-left">
+              <button id="btn-attach" class="composer-circle-btn" type="button" title="添加图片或粘贴截图" aria-label="添加图片">
+                <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M8 3.2v9.6M3.2 8h9.6"/></svg>
+              </button>
+              <button id="btn-params-pop" class="params-pill" type="button" title="调整本轮模型、思考档位与权限">成员默认</button>
+              <span id="shadow-hint" class="composer-hint">影子副本隔离中</span>
+            </div>
+            <div class="composer-bar-right">
+              <span id="draft-hint" class="draft-dot" title="草稿自动同步后端"></span>
+              <button id="btn-send" class="send-btn is-empty" type="button" title="发送 (Enter)" aria-label="发送">
+                <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 13V3M3.5 7.5L8 3l4.5 4.5"/></svg>
+              </button>
+              <button id="btn-abort" class="stop-btn hidden" type="button" title="立即中止当前任务" aria-label="停止">
+                <svg viewBox="0 0 16 16" width="11" height="11" fill="currentColor"><rect x="3" y="3" width="10" height="10" rx="2"/></svg>
+              </button>
+            </div>
+          </div>
+        </div>
+      </footer>
+    </section>
+
+    <!-- View 2: Pending Diff Review -->
+    <section id="view-review" class="view-pane hidden">
+      <div id="review-scroll" class="scroll-area review-stream">
+        <div id="undo-banner" class="banner ok hidden"></div>
+        <div id="review-ro-hint" class="note-box review-ro-hint hidden"></div>
+        <div id="review-empty" class="empty-box">
+          <div class="empty-title">暂无待验收的影子副本改动</div>
+          <div class="empty-sub">成员在影子副本中修改或新建文件后，会集中出现在这里供你逐文件审阅红绿 Diff。</div>
+        </div>
+        <div id="review-list" class="review-list"></div>
+      </div>
+    </section>
+
+    <!-- Modal 1: Settings Modal (Fixed Head + Scroll Body + Sticky Footer) -->
+    <div id="settings-modal" class="modal-backdrop hidden">
+      <div class="modal-card modal-sheet" role="dialog" aria-modal="true" aria-label="SideDesk 设置">
+        <div class="modal-head modal-head-tabbed">
+          <span class="modal-title">设置</span>
+          <button id="btn-modal-close" class="btn-modal-x" type="button" title="关闭 (Esc)" aria-label="关闭">
+            <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg>
+          </button>
+        </div>
+
+        <div class="modal-seg-tabs" role="tablist">
+          <button id="stab-personas" class="stab active" type="button" role="tab">成员人物卡</button>
+          <button id="stab-profile" class="stab" type="button" role="tab">我的资料</button>
+          <button id="stab-perms" class="stab" type="button" role="tab">默认权限</button>
+        </div>
+
+        <!-- Tab 1: Persona Cards (PRESERVES #pm-avatar-paste & avatar controls) -->
+        <div id="spane-personas" class="spane">
+          <div class="spane-scroll">
+            <div id="modal-persona-tabs" class="persona-tabs"></div>
+
+            <div class="avatar-editor">
+              <span id="pm-avatar-preview" class="avatar-circle lg">🧪</span>
+              <div class="avatar-editor-controls">
+                <div class="avatar-btn-row">
+                  <label class="btn btn-xs" style="cursor:pointer;">
+                    上传头像
+                    <input id="pm-avatar-file" type="file" accept="image/*" class="hidden" />
+                  </label>
+                  <button id="pm-avatar-paste" class="btn btn-xs" type="button">粘贴图片</button>
+                  <span class="muted-micro">自动裁剪 96×96</span>
+                </div>
+                <input id="pm-avatar-text" class="input-compact" placeholder="输入 Emoji（如 🐱），或按 Ctrl+V 粘贴截图/图片" />
+              </div>
+            </div>
+
+            <div class="field-grid">
+              <div class="field">
+                <label for="pm-name">角色名字</label>
+                <input id="pm-name" class="input-compact" placeholder="例如：Codex / 架构顾问" />
+              </div>
+              <div class="field">
+                <label for="pm-role">职责简介</label>
+                <input id="pm-role" class="input-compact" placeholder="后端架构与代码审计" />
+              </div>
+            </div>
+
+            <div class="field">
+              <label for="pm-address-as">对我的专属称呼（可选）</label>
+              <input id="pm-address-as" class="input-compact" placeholder="留空则沿用「我的资料」昵称" />
+            </div>
+
+            <div class="field">
+              <label for="pm-provider">驱动引擎</label>
+              <select id="pm-provider" class="select-compact">
+                <option value="codex-cli">本机 Codex CLI</option>
+                <option value="openai-compatible">OpenAI 兼容 API</option>
+              </select>
+            </div>
+
+            <!-- Codex CLI specific fields -->
+            <div id="pm-codex-fields" class="provider-box">
+              <div class="field-grid field-grid-model">
+                <div class="field">
+                  <label for="pm-codex-model">Codex 默认模型</label>
+                  <select id="pm-codex-model" class="select-compact"></select>
+                </div>
+                <div class="field">
+                  <label for="pm-effort">默认思考档位</label>
+                  <select id="pm-effort" class="select-compact">
+                    <option value="low">low</option>
+                    <option value="medium">medium</option>
+                    <option value="high">high</option>
+                    <option value="xhigh">xhigh</option>
+                    <option value="max">max</option>
+                    <option value="ultra">ultra</option>
+                  </select>
+                </div>
+              </div>
+              <label class="toggle-line">
+                <input id="pm-fast-mode" type="checkbox" class="switch-input" />
+                <span class="toggle-line-text">
+                  <b>⚡ 闪电加速</b>
+                  <span class="toggle-line-hint">开启后 2x 极速输出，但会增加订阅额度消耗</span>
+                </span>
+              </label>
+              <label class="toggle-line">
+                <input id="pm-clean-config" type="checkbox" class="switch-input" checked />
+                <span class="toggle-line-text">
+                  <b>纯净极速启动</b>
+                  <span class="toggle-line-hint">默认传 --ignore-user-config 跳过全局 config.toml 杂项插件，仍复用登录态</span>
+                </span>
+              </label>
+              <div class="field">
+                <label for="pm-codex-path">自定义 Codex 路径（可选）</label>
+                <input id="pm-codex-path" class="input-compact input-mono" placeholder="留空自动探测，填写则优先使用" />
+              </div>
+              <div class="inline-meta-row">
+                <button id="pm-recheck-codex" class="btn btn-xs" type="button">重新检测 Codex</button>
+                <span id="pm-codex-hint" class="muted-micro">启动已缓存，0ms 免阻塞</span>
+              </div>
+            </div>
+
+            <!-- OpenAI-compatible API specific fields -->
+            <div id="pm-api-fields" class="provider-box hidden">
+              <div class="field">
+                <label>常用平台快捷填充（不覆盖已有 Key）</label>
+                <div id="pm-api-presets" class="api-preset-row">
+                  <button type="button" class="api-preset-chip" data-api-preset="deepseek">DeepSeek</button>
+                  <button type="button" class="api-preset-chip" data-api-preset="openrouter">OpenRouter</button>
+                  <button type="button" class="api-preset-chip" data-api-preset="siliconflow">SiliconFlow</button>
+                  <button type="button" class="api-preset-chip" data-api-preset="ollama">Ollama 本地</button>
+                </div>
+              </div>
+              <div class="field">
+                <label for="pm-base-url">Base URL（自动兼容 /v1 或完整 /chat/completions）</label>
+                <input id="pm-base-url" class="input-compact input-mono" placeholder="https://api.deepseek.com/v1 或 http://127.0.0.1:11434/v1" />
+              </div>
+              <div class="field">
+                <div class="label-between">
+                  <label for="pm-api-key">API Key（仅存后端，前端脱敏）</label>
+                  <label id="pm-clear-key-wrap" class="inline-check hidden">
+                    <input id="pm-clear-key" type="checkbox" />
+                    <span>清除已存 Key</span>
+                  </label>
+                </div>
+                <input id="pm-api-key" type="password" class="input-compact input-mono" autocomplete="off" placeholder="留空表示免鉴权（如本地 Ollama）" />
+              </div>
+              <div class="field-grid">
+                <div class="field">
+                  <label for="pm-api-model">Model（模型名）</label>
+                  <input id="pm-api-model" class="input-compact input-mono" placeholder="deepseek-reasoner" />
+                </div>
+                <div class="field">
+                  <label for="pm-tool-mode">模式</label>
+                  <select id="pm-tool-mode" class="select-compact">
+                    <option value="agent">带读写工具 (Agent)</option>
+                    <option value="chat">纯对话 (Chat)</option>
+                  </select>
+                </div>
+              </div>
+              <div class="field">
+                <label for="pm-context-window">上下文窗口上限（可选，默认 128000 Tokens）</label>
+                <input id="pm-context-window" type="number" min="1024" max="10000000" step="1000" class="input-compact input-mono" placeholder="128000" />
+              </div>
+              <div class="inline-meta-row">
+                <button id="pm-test-conn" class="btn btn-xs" type="button">测试连接</button>
+                <span id="pm-test-hint" class="muted-micro">由后端发起最小化探测，不暴露 Key</span>
+              </div>
+              <div id="pm-test-result" class="test-result hidden"></div>
+            </div>
+
+            <!-- Persona Default Permissions (3-Group Capsules + 2 Presets) -->
+            <div class="provider-box">
+              <div class="section-subhead">该成员默认权限</div>
+              <div class="preset-row">
+                <button type="button" class="preset-btn" data-preset-scope="persona" data-preset="safe">🛡️ 安全隔离默认</button>
+                <button type="button" class="preset-btn preset-turbo" data-preset-scope="persona" data-preset="turbo">⚡ Turbo 全开直通</button>
+              </div>
+              <div class="perm-stack" data-perm-group="persona">
+                <div class="perm-row">
+                  <span class="perm-lbl">文件范围</span>
+                  <div class="seg-group" data-perm-key="fileScope">
+                    <button type="button" class="seg-btn" data-val="read-only">只读</button>
+                    <button type="button" class="seg-btn" data-val="shadow">影子隔离</button>
+                    <button type="button" class="seg-btn seg-turbo" data-val="direct">原目录不限</button>
+                  </div>
+                </div>
+                <div class="perm-row">
+                  <span class="perm-lbl">执行命令</span>
+                  <div class="seg-group" data-perm-key="commandPolicy">
+                    <button type="button" class="seg-btn" data-val="auto">自动执行</button>
+                    <button type="button" class="seg-btn" data-val="disabled">禁止</button>
+                  </div>
+                </div>
+                <div class="perm-row">
+                  <span class="perm-lbl">联网</span>
+                  <div class="seg-group" data-perm-key="networkPolicy">
+                    <button type="button" class="seg-btn" data-val="allow">允许</button>
+                    <button type="button" class="seg-btn" data-val="deny">禁止</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="field">
+              <label for="pm-prompt">系统人设词（影子模式自动追加防穿墙红线；Turbo 直通自动解除）</label>
+              <textarea id="pm-prompt" class="textarea-box" rows="4"></textarea>
+            </div>
+
+            <details id="pm-mem-fold" class="mem-fold" open>
+              <summary class="mem-summary">
+                <span>长期记忆条</span>
+                <span id="pm-mem-count" class="tag">0 条</span>
+              </summary>
+              <div class="mem-body">
+                <div class="mem-add-row">
+                  <input id="pm-mem-input" class="input-compact" placeholder="添加一句长期偏好或背景约定..." />
+                  <button id="pm-mem-add" class="btn btn-xs" type="button">+ 添加</button>
+                </div>
+                <div id="pm-mem-list" class="mem-list"></div>
+              </div>
+            </details>
+          </div>
+
+          <div class="modal-foot">
+            <button id="pm-delete" class="btn btn-danger-outline" type="button">删除此卡</button>
+            <div class="foot-right">
+              <button id="pm-cancel" class="btn" type="button">取消</button>
+              <button id="pm-save" class="btn btn-primary" type="button">保存人物卡</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Tab 2: My Profile -->
+        <div id="spane-profile" class="spane hidden">
+          <div class="spane-scroll">
+            <div class="avatar-editor">
+              <span id="up-avatar-preview" class="avatar-circle lg">🧑</span>
+              <div class="avatar-editor-controls">
+                <div class="avatar-btn-row">
+                  <label class="btn btn-xs" style="cursor:pointer;">
+                    上传头像
+                    <input id="up-avatar-file" type="file" accept="image/*" class="hidden" />
+                  </label>
+                  <button id="up-avatar-paste" class="btn btn-xs" type="button">粘贴图片</button>
+                  <span class="muted-micro">自动裁剪 96×96</span>
+                </div>
+                <input id="up-avatar-text" class="input-compact" placeholder="输入 Emoji（如 🧑‍💻），或按 Ctrl+V 粘贴截图" />
+              </div>
+            </div>
+
+            <div class="field">
+              <label for="up-name">我的称呼</label>
+              <input id="up-name" class="input-compact" placeholder="默认：我（填写自定义称呼后，成员会自然地这样称呼你）" />
+            </div>
+
+            <div class="field">
+              <label>外观主题</label>
+              <div id="up-theme-seg" class="seg-group" role="radiogroup" aria-label="外观主题">
+                <button type="button" class="seg-btn" data-theme-val="auto">跟随宿主</button>
+                <button type="button" class="seg-btn" data-theme-val="light">浅色</button>
+                <button type="button" class="seg-btn" data-theme-val="dark">深色</button>
+              </div>
+            </div>
+
+            <div class="note-box">
+              当你填写了自定义称呼（如「老板」「阿明」），后端会自动把称呼注入 Codex CLI 与 OpenAI API 的系统指令中，成员在 1v1 交流里会自然称呼你。资料持久保存在插件数据目录，重开面板不丢失。
+            </div>
+          </div>
+
+          <div class="modal-foot modal-foot-end">
+            <button id="up-save" class="btn btn-primary" type="button">保存我的资料</button>
+          </div>
+        </div>
+
+        <!-- Tab 3: Default Permissions -->
+        <div id="spane-perms" class="spane hidden">
+          <div class="spane-scroll">
+            <div class="note-box">
+              新建成员人物卡时将自动套用这组默认权限；每个成员卡与每次对话输入框左下角也都可以独立覆盖。
+            </div>
+
+            <div class="preset-row">
+              <button type="button" class="preset-btn" data-preset-scope="global" data-preset="safe">🛡️ 安全隔离默认</button>
+              <button type="button" class="preset-btn preset-turbo" data-preset-scope="global" data-preset="turbo">⚡ Turbo 全开直通</button>
+            </div>
+
+            <div class="perm-stack" data-perm-group="global">
+              <div class="perm-row">
+                <span class="perm-lbl">文件范围</span>
+                <div class="seg-group" data-perm-key="fileScope">
+                  <button type="button" class="seg-btn" data-val="read-only">只读</button>
+                  <button type="button" class="seg-btn" data-val="shadow">影子隔离</button>
+                  <button type="button" class="seg-btn seg-turbo" data-val="direct">原目录不限</button>
+                </div>
+              </div>
+              <div class="perm-row">
+                <span class="perm-lbl">执行命令</span>
+                <div class="seg-group" data-perm-key="commandPolicy">
+                  <button type="button" class="seg-btn" data-val="auto">自动执行</button>
+                  <button type="button" class="seg-btn" data-val="disabled">禁止</button>
+                </div>
+              </div>
+              <div class="perm-row">
+                <span class="perm-lbl">联网</span>
+                <div class="seg-group" data-perm-key="networkPolicy">
+                  <button type="button" class="seg-btn" data-val="allow">允许</button>
+                  <button type="button" class="seg-btn" data-val="deny">禁止</button>
+                </div>
+              </div>
+            </div>
+
+            <div id="global-perm-desc" class="note-box"></div>
+          </div>
+
+          <div class="modal-foot modal-foot-end">
+            <button id="dp-save" class="btn btn-primary" type="button">保存默认权限</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal 2: New Topic & Context Inheritance Modal -->
+    <div id="new-topic-modal" class="modal-backdrop hidden">
+      <div class="modal-card modal-sm modal-dialog" role="dialog" aria-modal="true" aria-label="开启新话题">
+        <div class="modal-head">
+          <span class="modal-title">开启新话题</span>
+          <button id="btn-nt-close" class="btn-modal-x" type="button" title="关闭 (Esc)" aria-label="关闭">
+            <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg>
+          </button>
+        </div>
+
+        <div class="spane-scroll">
+          <div class="field">
+            <label for="nt-title">新话题名称</label>
+            <input id="nt-title" class="input-compact" placeholder="Codex · 新话题" />
+            <div class="field-hint">留空将使用默认名称；当前话题会自动归档，之后可以在话题列表里找回</div>
+          </div>
+
+          <div id="nt-inherit-section" class="inherit-card hidden">
+            <label class="inherit-check">
+              <input id="nt-inherit" type="checkbox" class="switch-input" checked />
+              <span>新话题继承压缩后的上下文</span>
+            </label>
+            <div class="field-hint">成员在新话题里会先看到这段摘要，不需要从头讲起</div>
+
+            <div id="nt-summary-detail" class="summary-detail">
+              <div id="nt-summary-fresh" class="banner ok hidden">✅ 直接复用已有摘要（零额外额度）</div>
+              <div id="nt-summary-need" class="summary-need hidden">
+                <div id="nt-summary-need-text" class="banner warn"></div>
+                <div class="summarizer-row">
+                  <span>由</span>
+                  <select id="nt-summarizer" class="select-compact" style="flex:1;min-width:0;"></select>
+                  <span>整理摘要</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="modal-foot modal-foot-end">
+          <button id="btn-nt-cancel" class="btn" type="button">取消</button>
+          <button id="btn-nt-confirm" class="btn btn-primary" type="button">开始新话题</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal 3: Topic Manager Modal (⋯) -->
+    <div id="topic-mgr-modal" class="modal-backdrop hidden">
+      <div class="modal-card modal-sheet" role="dialog" aria-modal="true" aria-label="话题管理">
+        <div class="modal-head">
+          <span class="modal-title">话题管理</span>
+          <div class="head-right-row">
+            <div class="mini-seg">
+              <button id="tm-filter-cur" class="mini-seg-btn active" type="button">当前成员</button>
+              <button id="tm-filter-all" class="mini-seg-btn" type="button">全部</button>
+            </div>
+            <button id="btn-tm-close" class="btn-modal-x" type="button" title="关闭 (Esc)" aria-label="关闭">
+              <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg>
+            </button>
+          </div>
+        </div>
+
+        <div class="spane-scroll">
+          <div id="tm-compress-bar" class="summarizer-row">
+            <span class="summarizer-lbl">压缩整理成员：</span>
+            <select id="tm-summarizer" class="select-compact" style="flex:1;min-width:0;"></select>
+          </div>
+
+          <div id="tm-export-sheet" class="export-sheet hidden">
+            <div class="banner-row">
+              <b id="tm-export-title">导出预览</b>
+              <button id="tm-export-close" class="btn-link" type="button">收起</button>
+            </div>
+            <div id="tm-export-path" class="field-hint input-mono" style="word-break:break-all;"></div>
+            <textarea id="tm-export-md" class="inherited-textarea input-mono" rows="6" readonly></textarea>
+            <div class="action-bar">
+              <button id="tm-export-copy" class="btn btn-xs btn-primary" type="button">复制 Markdown</button>
+              <button id="tm-export-dl" class="btn btn-xs" type="button">下载 .md</button>
+              <button id="tm-export-open" class="btn btn-xs" type="button">侧栏打开</button>
+            </div>
+          </div>
+
+          <div id="tm-list" class="tm-list"></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="toast" class="toast hidden"></div>
+  </div>
+  <script type="module">/*__INLINE_JS__*/</script>
+</body>
+</html>
