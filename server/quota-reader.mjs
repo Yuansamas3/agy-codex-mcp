@@ -1,3 +1,4 @@
+import { spawn, spawnSync } from 'node:child_process';
 import { open, readdir, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -28,12 +29,12 @@ function toFiniteNonNeg(val) {
 
 function normalizeRateWindow(raw) {
   if (!raw || typeof raw !== 'object') return null;
-  const rawUsed = Number(raw.used_percent);
+  const rawUsed = Number(raw.used_percent ?? raw.usedPercent);
   if (!Number.isFinite(rawUsed)) return null;
   const usedPercent = clamp(round1(rawUsed), 0, 100);
   const remainingPercent = clamp(round1(100 - usedPercent), 0, 100);
-  const windowMinutes = toFiniteNonNeg(raw.window_minutes);
-  const rawReset = Number(raw.resets_at);
+  const windowMinutes = toFiniteNonNeg(raw.window_minutes ?? raw.windowDurationMins);
+  const rawReset = Number(raw.resets_at ?? raw.resetsAt);
   const resetsAt = Number.isFinite(rawReset) && rawReset > 0 ? Math.floor(rawReset) : null;
   return {
     usedPercent,
@@ -43,7 +44,7 @@ function normalizeRateWindow(raw) {
   };
 }
 
-export function normalizeRateLimits(rawRl, snapshotAt = null, scannedAt = Date.now()) {
+export function normalizeRateLimits(rawRl, snapshotAt = null, scannedAt = Date.now(), source = 'codex-sessions') {
   if (!rawRl || typeof rawRl !== 'object') {
     return makeUnavailableQuota(scannedAt);
   }
@@ -52,23 +53,25 @@ export function normalizeRateLimits(rawRl, snapshotAt = null, scannedAt = Date.n
   if (!primary && !secondary) {
     return makeUnavailableQuota(scannedAt);
   }
+  const rawPlan = rawRl.plan_type ?? rawRl.planType;
   const planType =
-    typeof rawRl.plan_type === 'string' && rawRl.plan_type.trim()
-      ? rawRl.plan_type.trim()
+    typeof rawPlan === 'string' && rawPlan.trim()
+      ? rawPlan.trim()
       : null;
   const credits =
     rawRl.credits && typeof rawRl.credits === 'object'
       ? {
-          hasCredits: Boolean(rawRl.credits.has_credits),
+          hasCredits: Boolean(rawRl.credits.has_credits ?? rawRl.credits.hasCredits),
           unlimited: Boolean(rawRl.credits.unlimited),
           balance: rawRl.credits.balance != null ? String(rawRl.credits.balance) : '0',
         }
       : null;
+  const rawLimitId = rawRl.limit_id ?? rawRl.limitId;
 
   return {
     available: true,
-    source: 'codex-sessions',
-    limitId: typeof rawRl.limit_id === 'string' && rawRl.limit_id.trim() ? rawRl.limit_id.trim() : 'codex',
+    source,
+    limitId: typeof rawLimitId === 'string' && rawLimitId.trim() ? rawLimitId.trim() : 'codex',
     planType,
     primary,
     secondary,
@@ -366,25 +369,152 @@ async function readParsedTailWithFallback(filePath, tailBytes = DEFAULT_TAIL_BYT
   return { ...parsed, mtimeMs: first.mtimeMs, size: first.size };
 }
 
+export function fetchLiveRateLimitsFromAppServerAsync(codexBinPath, timeoutMs = 8000) {
+  return new Promise((resolvePromise) => {
+    if (!codexBinPath) {
+      resolvePromise(null);
+      return;
+    }
+    let child = null;
+    let settled = false;
+    let initAcked = false;
+    let buf = '';
+
+    const cleanupChild = () => {
+      if (!child) return;
+      const pid = child.pid;
+      try {
+        child.stdin?.end();
+      } catch {
+        // ignore
+      }
+      if (process.platform === 'win32' && pid) {
+        try {
+          spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], {
+            windowsHide: true,
+            timeout: 2000,
+          });
+        } catch {
+          // ignore
+        }
+      }
+      try {
+        if (!child.killed) child.kill('SIGKILL');
+      } catch {
+        // ignore
+      }
+      child = null;
+    };
+
+    const finish = (val) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      cleanupChild();
+      resolvePromise(val);
+    };
+
+    const timer = setTimeout(() => finish(null), timeoutMs);
+
+    try {
+      child = spawn(codexBinPath, ['-c', 'mcp_servers={}', 'app-server'], {
+        stdio: ['pipe', 'pipe', 'ignore'],
+        windowsHide: true,
+      });
+    } catch {
+      finish(null);
+      return;
+    }
+
+    child.on('error', () => finish(null));
+    child.on('close', () => finish(null));
+
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => {
+      if (settled) return;
+      buf += chunk;
+      let nl;
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line) continue;
+        let msg;
+        try {
+          msg = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (msg?.id === 1 && !initAcked) {
+          initAcked = true;
+          try {
+            child.stdin.write(
+              JSON.stringify({ jsonrpc: '2.0', method: 'initialized', params: {} }) +
+                '\n' +
+                JSON.stringify({
+                  jsonrpc: '2.0',
+                  id: 2,
+                  method: 'account/rateLimits/read',
+                  params: {},
+                }) +
+                '\n'
+            );
+          } catch {
+            finish(null);
+          }
+        } else if (msg?.id === 2) {
+          const res = msg.result;
+          const rl = res?.rateLimitsByLimitId?.codex || res?.rateLimits || null;
+          const now = Date.now();
+          const normalized = rl ? normalizeRateLimits(rl, now, now, 'codex-live-rpc') : null;
+          finish(normalized?.available ? normalized : null);
+          return;
+        }
+      }
+    });
+
+    try {
+      child.stdin.write(
+        JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'initialize',
+          params: { clientInfo: { name: 'sidedesk', version: '0.1.0' } },
+        }) + '\n'
+      );
+    } catch {
+      finish(null);
+    }
+  });
+}
+
 export class CodexQuotaReader {
   constructor({
     sessionsDir = '',
     quotaTtlMs = 15_000,
+    liveTtlMs = 180_000,
     threadTtlMs = 8_000,
     tailBytes = DEFAULT_TAIL_BYTES,
+    getCodexBinPath = null,
   } = {}) {
     this.sessionsDir = sessionsDir || getDefaultCodexSessionsDir();
     this.quotaTtlMs = quotaTtlMs;
+    this.liveTtlMs = liveTtlMs;
     this.threadTtlMs = threadTtlMs;
     this.tailBytes = tailBytes;
+    this._binResolver = typeof getCodexBinPath === 'function' ? getCodexBinPath : null;
 
     this._quotaCache = null;
     this._quotaFetchedAt = 0;
+    this._lastLiveAt = 0;
     this._quotaPromise = null;
 
     this._threadFileCache = new Map(); // threadId -> filePath
     this._threadUsageCache = new Map(); // threadId -> { filePath, mtimeMs, size, checkedAt, contextUsage }
     this._threadPending = new Map(); // threadId -> Promise
+  }
+
+  setCodexBinResolver(fn) {
+    this._binResolver = typeof fn === 'function' ? fn : null;
   }
 
   getQuotaFast() {
@@ -400,17 +530,40 @@ export class CodexQuotaReader {
     return makeUnavailableQuota(Date.now());
   }
 
-  async getQuota({ force = false } = {}) {
+  async getQuota({ force = false, forceLive = false } = {}) {
     const now = Date.now();
-    if (!force && this._quotaCache && now - this._quotaFetchedAt < this.quotaTtlMs) {
+    if (!force && !forceLive && this._quotaCache && now - this._quotaFetchedAt < this.quotaTtlMs) {
       return this._quotaCache;
     }
-    if (this._quotaPromise && !force) {
+    if (this._quotaPromise && !force && !forceLive) {
       return this._quotaPromise;
     }
 
     const run = (async () => {
       try {
+        // 1. Live 0-token OpenAI server query via `codex app-server -> account/rateLimits/read`
+        //    Triggered on initial load, every `liveTtlMs` (3m), or whenever user clicks Refresh (`forceLive`).
+        const shouldQueryLive =
+          Boolean(this._binResolver) &&
+          (forceLive || !this._lastLiveAt || Date.now() - this._lastLiveAt >= this.liveTtlMs);
+        if (shouldQueryLive) {
+          try {
+            const binPath = await this._binResolver();
+            if (binPath) {
+              const liveQuota = await fetchLiveRateLimitsFromAppServerAsync(binPath);
+              if (liveQuota?.available) {
+                this._quotaCache = liveQuota;
+                this._quotaFetchedAt = Date.now();
+                this._lastLiveAt = Date.now();
+                return liveQuota;
+              }
+            }
+          } catch {
+            // Fall through to local .jsonl snapshot on offline / RPC failure
+          }
+        }
+
+        // If we already have a fresh live RPC snapshot and weren't forcing live, check if any local .jsonl is newer
         const files = await listRecentJsonlFilesAsync(this.sessionsDir, MAX_QUOTA_SCAN_FILES);
         const scannedAt = Date.now();
         for (const f of files) {
@@ -418,17 +571,30 @@ export class CodexQuotaReader {
           if (parsed?.rateLimits) {
             const normalized = normalizeRateLimits(parsed.rateLimits, parsed.rateLimitsTs, scannedAt);
             if (normalized.available) {
+              if (
+                this._quotaCache?.available &&
+                this._quotaCache.source === 'codex-live-rpc' &&
+                (this._quotaCache.snapshotAt || 0) > (normalized.snapshotAt || 0)
+              ) {
+                this._quotaFetchedAt = scannedAt;
+                return this._quotaCache;
+              }
               this._quotaCache = normalized;
               this._quotaFetchedAt = scannedAt;
               return normalized;
             }
           }
         }
+        if (this._quotaCache?.available) {
+          this._quotaFetchedAt = scannedAt;
+          return this._quotaCache;
+        }
         const empty = makeUnavailableQuota(scannedAt);
         this._quotaCache = empty;
         this._quotaFetchedAt = scannedAt;
         return empty;
       } catch {
+        if (this._quotaCache?.available) return this._quotaCache;
         const empty = makeUnavailableQuota(Date.now());
         this._quotaCache = empty;
         this._quotaFetchedAt = Date.now();
@@ -547,9 +713,9 @@ export class CodexQuotaReader {
     }
   }
 
-  async refreshAll({ threadId = '' } = {}) {
+  async refreshAll({ threadId = '', forceLive = true } = {}) {
     const [quota, contextUsage] = await Promise.all([
-      this.getQuota({ force: true }),
+      this.getQuota({ force: true, forceLive }),
       threadId ? this.getThreadContextUsage(threadId, { force: true }) : Promise.resolve(null),
     ]);
     return { quota, contextUsage };

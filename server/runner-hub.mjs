@@ -8,8 +8,16 @@ export class RunnerHub {
     this.store = store;
     this.quotaReader = new CodexQuotaReader({ sessionsDir });
     this.codex = new CodexRunner(store, this.quotaReader);
+    if (!sessionsDir) {
+      this.quotaReader.setCodexBinResolver(async () => {
+        const fast = this.codex.getCodexBinaryFast();
+        if (fast?.path) return fast.path;
+        const refreshed = await this.codex.refreshCodexBinaryAsync();
+        return refreshed?.path || '';
+      });
+    }
     this.openai = new OpenAiRunner(store);
-    // Non-blocking warm-up so local quota snapshot is ready on first panel open
+    // Non-blocking warm-up so live/local quota snapshot is ready on first panel open
     this.quotaReader.getQuota().catch(() => {});
   }
 

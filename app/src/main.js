@@ -1461,7 +1461,8 @@ function renderQuotaUI(st) {
   if (isApi) {
     el.quotaPopTs.textContent = ctx?.updatedAt ? `更新 ${fmtTime(ctx.updatedAt)}` : 'API 统计';
   } else {
-    el.quotaPopTs.textContent = quota?.snapshotAt ? `快照 ${fmtTime(quota.snapshotAt)}` : '本地只读';
+    const srcTag = quota?.source === 'codex-live-rpc' ? '实时' : '快照';
+    el.quotaPopTs.textContent = quota?.snapshotAt ? `${srcTag} ${fmtTime(quota.snapshotAt)}` : '待同步';
   }
 
   el.quotaCodexSection.classList.toggle('hidden', isApi);
@@ -3264,13 +3265,17 @@ el.btnQuotaRefresh?.addEventListener('click', async () => {
       renderQuotaUI(serverState);
     }
     showToast(
-      res?.quota?.available ? '已刷新本地配额快照' : '暂未检测到本地 Codex 配额快照'
+      res?.quota?.available
+        ? res.quota.source === 'codex-live-rpc'
+          ? '已同步官方实时配额'
+          : '已刷新本地配额快照'
+        : '暂未获取到 Codex 配额信息'
     );
   } catch (err) {
     showToast(`刷新失败: ${err.message}`);
   } finally {
     el.btnQuotaRefresh.disabled = false;
-    el.btnQuotaRefresh.textContent = '刷新本地快照';
+    el.btnQuotaRefresh.textContent = '刷新实时配额';
   }
 });
 
