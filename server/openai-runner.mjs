@@ -24,6 +24,8 @@ import {
 } from './prompt-composer.mjs';
 import {
   assertRealPathInsideRoot,
+  buildAugmentedEnv,
+  isSameEndpointHost,
   isSameOrInsideRealPath,
   lstatNoThrow,
   realpathNative,
@@ -366,7 +368,7 @@ const RUN_COMMAND_TOOL = {
   },
 };
 
-function runDirectCommandAsync(workDir, args, signal) {
+function runDirectCommandAsync(workDir, args, signal, extraPath = '') {
   return new Promise((resolveCmd) => {
     const command = String(args.command || '').trim();
     if (!command) {
@@ -402,7 +404,7 @@ function runDirectCommandAsync(workDir, args, signal) {
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
       detached: !isWin,
-      env: { ...process.env, NO_COLOR: '1' },
+      env: buildAugmentedEnv(process.env, extraPath, { NO_COLOR: '1' }),
     });
 
     let stdout = '';
@@ -726,7 +728,9 @@ export function executeShadowTool(workDir, sandbox, name, rawArgs) {
           error: `在 ${relPosix} 中找到 ${count} 处匹配，请提供更多上下文或传 replace_all=true`,
         };
       }
-      const next = args.replace_all ? cur.split(oldText).join(newText) : cur.replace(oldText, newText);
+      const next = args.replace_all
+        ? cur.split(oldText).join(newText)
+        : cur.replace(oldText, () => newText);
       writeFileSync(absPath, next, 'utf8');
       return { ok: true, path: relPosix, replacements: args.replace_all ? count : 1 };
     }
@@ -750,7 +754,14 @@ export function executeShadowTool(workDir, sandbox, name, rawArgs) {
   }
 }
 
-export async function executeToolAsync(workDir, sandboxOrPerms, name, rawArgs, signal = null) {
+export async function executeToolAsync(
+  workDir,
+  sandboxOrPerms,
+  name,
+  rawArgs,
+  signal = null,
+  extraPath = ''
+) {
   const perms =
     sandboxOrPerms && typeof sandboxOrPerms === 'object'
       ? normalizePermissions(sandboxOrPerms, 'workspace-write')
@@ -774,7 +785,7 @@ export async function executeToolAsync(workDir, sandboxOrPerms, name, rawArgs, s
     } else if (rawArgs && typeof rawArgs === 'object') {
       args = rawArgs;
     }
-    return runDirectCommandAsync(workDir, args, signal);
+    return runDirectCommandAsync(workDir, args, signal, extraPath);
   }
   return executeShadowTool(workDir, resolvedSandbox, name, rawArgs);
 }
@@ -917,71 +928,135 @@ async function callChatCompletion({
     }
   }
 
-  while (true) {
+  let doneReceived = false;
+  let pendingDataLines = [];
+
+  const processPayload = (payload) => {
+    if (!payload) return;
+    if (payload === '[DONE]') {
+      doneReceived = true;
+      return;
+    }
+
+    let parsed;
+    try {
+      parsed = JSON.parse(payload);
+    } catch {
+      return;
+    }
+
+    if (parsed?.error && !parsed?.choices?.length) {
+      const errMsg =
+        typeof parsed.error === 'string'
+          ? parsed.error
+          : parsed.error?.message || JSON.stringify(parsed.error);
+      throw new Error(redactSecrets(`上游流式返回错误: ${errMsg}`, [apiKey]));
+    }
+
+    if (parsed.usage) usage = parsed.usage;
+    const choice = parsed.choices?.[0];
+    if (!choice) return;
+    const delta = choice.delta || choice.message || {};
+
+    const rDelta =
+      typeof delta.reasoning_content === 'string'
+        ? delta.reasoning_content
+        : typeof delta.reasoning === 'string'
+          ? delta.reasoning
+          : '';
+    if (rDelta) {
+      if (!sawReasoning) {
+        sawReasoning = true;
+        if (onFirstReasoning) onFirstReasoning();
+      }
+      reasoning += rDelta;
+      reasoningPending += rDelta;
+      flushReasoning(false);
+    }
+
+    if (typeof delta.content === 'string' && delta.content.length > 0) {
+      flushReasoning(true);
+      content += delta.content;
+      if (onContentDelta) onContentDelta(content);
+    }
+
+    if (Array.isArray(delta.tool_calls)) {
+      flushReasoning(true);
+      for (const tc of delta.tool_calls) {
+        const idx = tc.index ?? toolMap.size;
+        if (!toolMap.has(idx)) {
+          toolMap.set(idx, {
+            id: tc.id || `call_${idx}_${randomUUID().slice(0, 6)}`,
+            type: 'function',
+            function: { name: '', arguments: '' },
+          });
+        }
+        const slot = toolMap.get(idx);
+        if (tc.id) slot.id = tc.id;
+        if (tc.function?.name) slot.function.name += tc.function.name;
+        if (tc.function?.arguments) slot.function.arguments += tc.function.arguments;
+      }
+    }
+  };
+
+  const flushEventBlock = () => {
+    if (pendingDataLines.length === 0) return;
+    const joined = pendingDataLines.join('\n').trim();
+    pendingDataLines = [];
+    processPayload(joined);
+  };
+
+  while (!doneReceived) {
     const { done, value } = await reader.read();
-    if (done) break;
+    if (done) {
+      buffer += decoder.decode();
+      if (buffer) {
+        for (const remLine of buffer.split(/\r?\n/)) {
+          const trimmed = remLine.trim();
+          if (trimmed.startsWith('data:')) {
+            pendingDataLines.push(trimmed.slice(5).trimStart());
+          } else if (!trimmed) {
+            flushEventBlock();
+          }
+        }
+      }
+      flushEventBlock();
+      break;
+    }
     buffer += decoder.decode(value, { stream: true });
     const lines = buffer.split(/\r?\n/);
     buffer = lines.pop() ?? '';
 
     for (const rawLine of lines) {
-      const line = rawLine.trim();
-      if (!line || line.startsWith(':')) continue;
-      if (!line.startsWith('data:')) continue;
-      const payload = line.slice(5).trim();
-      if (payload === '[DONE]') continue;
-
-      let parsed;
-      try {
-        parsed = JSON.parse(payload);
-      } catch {
+      const trimmed = rawLine.trim();
+      if (!trimmed) {
+        flushEventBlock();
+        if (doneReceived) break;
         continue;
       }
-
-      if (parsed.usage) usage = parsed.usage;
-      const choice = parsed.choices?.[0];
-      if (!choice) continue;
-      const delta = choice.delta || choice.message || {};
-
-      const rDelta =
-        typeof delta.reasoning_content === 'string'
-          ? delta.reasoning_content
-          : typeof delta.reasoning === 'string'
-            ? delta.reasoning
-            : '';
-      if (rDelta) {
-        if (!sawReasoning) {
-          sawReasoning = true;
-          if (onFirstReasoning) onFirstReasoning();
-        }
-        reasoning += rDelta;
-        reasoningPending += rDelta;
-        flushReasoning(false);
+      if (trimmed.startsWith(':')) continue;
+      if (!trimmed.startsWith('data:')) continue;
+      const dataPart = trimmed.slice(5).trimStart();
+      if (dataPart.trim() === '[DONE]') {
+        flushEventBlock();
+        doneReceived = true;
+        break;
       }
-
-      if (typeof delta.content === 'string' && delta.content.length > 0) {
-        flushReasoning(true);
-        content += delta.content;
-        if (onContentDelta) onContentDelta(content);
+      // Fast-path complete single-line JSON frame while still supporting multi-line SSE `data:` blocks
+      if (pendingDataLines.length === 0 && dataPart.startsWith('{') && dataPart.endsWith('}')) {
+        processPayload(dataPart);
+      } else {
+        pendingDataLines.push(dataPart);
       }
+      if (doneReceived) break;
+    }
+  }
 
-      if (Array.isArray(delta.tool_calls)) {
-        flushReasoning(true);
-        for (const tc of delta.tool_calls) {
-          const idx = tc.index ?? toolMap.size;
-          if (!toolMap.has(idx)) {
-            toolMap.set(idx, {
-              id: tc.id || `call_${idx}_${randomUUID().slice(0, 6)}`,
-              type: 'function',
-              function: { name: '', arguments: '' },
-            });
-          }
-          const slot = toolMap.get(idx);
-          if (tc.id) slot.id = tc.id;
-          if (tc.function?.name) slot.function.name += tc.function.name;
-          if (tc.function?.arguments) slot.function.arguments += tc.function.arguments;
-        }
-      }
+  if (doneReceived) {
+    try {
+      await reader.cancel();
+    } catch {
+      // ignore stream cancel errors
     }
   }
 
@@ -1050,7 +1125,19 @@ export class OpenAiRunner {
     let effectiveKey = String(apiKey || '').trim();
     if (!effectiveKey && !clearApiKey && existingPersonaId) {
       const saved = this.store.getPersona(existingPersonaId);
-      effectiveKey = String(saved?.apiKey || '').trim();
+      const savedKey = String(saved?.apiKey || '').trim();
+      if (savedKey) {
+        if (saved?.baseUrl && baseUrl && !isSameEndpointHost(saved.baseUrl, baseUrl)) {
+          return {
+            ok: false,
+            latencyMs: 0,
+            endpoint: resolveChatCompletionsUrl(baseUrl),
+            model: String(model || '').trim(),
+            error: '接口域名已变更：为防止已保存的旧密钥发送到新接口，请先输入新接口的 API Key 再测试连接',
+          };
+        }
+        effectiveKey = savedKey;
+      }
     }
     const endpoint = resolveChatCompletionsUrl(baseUrl);
     const effectiveModel = String(model || '').trim();
@@ -1537,7 +1624,8 @@ export class OpenAiRunner {
           job.liveReply = turn.content;
         }
 
-        if (!turn.toolCalls || turn.toolCalls.length === 0) {
+        const allowedToolNames = new Set(tools.map((t) => t.function?.name).filter(Boolean));
+        if (!turn.toolCalls || turn.toolCalls.length === 0 || toolMode === 'chat' || allowedToolNames.size === 0) {
           break;
         }
 
@@ -1553,13 +1641,16 @@ export class OpenAiRunner {
           const fnArgs = tc.function?.arguments || '{}';
           this._setStage(job, 'executing', `执行工具 ${fnName}...`);
           this.store.appendJobEvent(job, 'command', `调用工具 ${fnName}(${String(fnArgs).slice(0, 180)})`);
-          const toolOut = await executeToolAsync(
-            activeWorkDir,
-            effectivePerms,
-            fnName,
-            fnArgs,
-            controller.signal
-          );
+          const toolOut = !allowedToolNames.has(fnName)
+            ? { ok: false, error: `权限拒绝：当前模式未开放工具 ${fnName}` }
+            : await executeToolAsync(
+                activeWorkDir,
+                effectivePerms,
+                fnName,
+                fnArgs,
+                controller.signal,
+                this.store.getExtraPath()
+              );
           const summary = toolOut.ok
             ? `工具 ${fnName} 完成`
             : `工具 ${fnName} 拦截/报错: ${toolOut.error}`;
@@ -1667,6 +1758,10 @@ export class OpenAiRunner {
           jobId: job.id,
         });
       } else {
+        const knownSecrets = [persona?.apiKey || '', ...this.store.getKnownSecrets()];
+        if (job.finalReply) {
+          job.finalReply = redactSecrets(job.finalReply, knownSecrets);
+        }
         job.status = 'completed';
         job.stage = 'completed';
         job.stageLabel = '已完成';

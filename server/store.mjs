@@ -12,6 +12,7 @@ import { join } from 'node:path';
 import {
   atomicWriteFileSync,
   isSafeBitmapDataUrl,
+  isSameEndpointHost,
   redactSecrets,
 } from './security.mjs';
 
@@ -490,6 +491,7 @@ export class SideDeskStore {
       version: 3,
       userProfile: normalizeUserProfile(null),
       defaultPermissions: { ...PRESET_SAFE_PERMISSIONS },
+      extraPath: '',
       personas: createDefaultPersonas(),
       sessions: [],
       jobs: [],
@@ -519,6 +521,7 @@ export class SideDeskStore {
         version: 3,
         userProfile: normalizeUserProfile(parsed?.userProfile),
         defaultPermissions: normalizePermissions(parsed?.defaultPermissions, 'workspace-write'),
+        extraPath: typeof parsed?.extraPath === 'string' ? parsed.extraPath.replace(/\0/g, '').slice(0, 4096) : '',
         personas,
         sessions: Array.isArray(parsed?.sessions)
           ? parsed.sessions.map(normalizeSessionRecord)
@@ -674,7 +677,11 @@ export class SideDeskStore {
     return normalizePermissions(this.state.defaultPermissions, 'workspace-write');
   }
 
-  saveDefaultPermissions(input) {
+  getExtraPath() {
+    return typeof this.state.extraPath === 'string' ? this.state.extraPath : '';
+  }
+
+  saveDefaultPermissions(input = {}) {
     const cur = this.getDefaultPermissions();
     const next = normalizePermissions(
       {
@@ -685,6 +692,9 @@ export class SideDeskStore {
       permissionsToSandbox(cur)
     );
     this.state.defaultPermissions = next;
+    if (typeof input?.extraPath === 'string') {
+      this.state.extraPath = input.extraPath.replace(/\0/g, '').trim().slice(0, 4096);
+    }
     this.flush();
     return next;
   }
@@ -776,6 +786,7 @@ export class SideDeskStore {
         existing.defaultSandbox = input.defaultSandbox;
         existing.permissions = permissionsFromSandbox(input.defaultSandbox);
       }
+      const prevBaseUrl = existing.baseUrl || '';
       if (typeof input.baseUrl === 'string') {
         existing.baseUrl = input.baseUrl.trim();
       }
@@ -785,11 +796,24 @@ export class SideDeskStore {
       if (input.contextWindow !== undefined) {
         existing.contextWindow = normalizeContextWindow(input.contextWindow);
       }
-      // API Key update semantics: clearApiKey wipes it; non-empty string overwrites; empty preserves existing.
+      // API Key update semantics:
+      // - clearApiKey wipes it;
+      // - non-empty string overwrites;
+      // - if Base URL host changed while existing had a saved key and no new key was supplied, reject silent credential carryover!
+      const incomingKey = typeof input.apiKey === 'string' ? input.apiKey.trim() : '';
       if (input.clearApiKey === true) {
         existing.apiKey = '';
-      } else if (typeof input.apiKey === 'string' && input.apiKey.trim() !== '') {
-        existing.apiKey = input.apiKey.trim();
+      } else if (incomingKey !== '') {
+        existing.apiKey = incomingKey;
+      } else if (
+        existing.apiKey &&
+        typeof input.baseUrl === 'string' &&
+        prevBaseUrl &&
+        existing.baseUrl &&
+        !isSameEndpointHost(prevBaseUrl, existing.baseUrl)
+      ) {
+        existing.baseUrl = prevBaseUrl;
+        throw new Error('接口域名已变更：为防止旧 API Key 被发送到新接口，请填写新接口密钥或勾选清空密钥');
       }
       existing.updatedAt = now;
       this.flush();
@@ -930,8 +954,14 @@ export class SideDeskStore {
     if (!sess) throw new Error(`未找到话题: ${sessionId}`);
     sess.latestSummary = {
       summary: String(summaryText || '').trim(),
-      messageCountAtSummary: getContentMessageCount(sess),
-      lastMessageId: getLastContentMessageId(sess),
+      messageCountAtSummary:
+        Number.isInteger(meta.messageCountAtSummary) && meta.messageCountAtSummary >= 0
+          ? meta.messageCountAtSummary
+          : getContentMessageCount(sess),
+      lastMessageId:
+        typeof meta.lastMessageId === 'string' && meta.lastMessageId
+          ? meta.lastMessageId
+          : getLastContentMessageId(sess),
       summarizerPersonaId: String(meta.summarizerPersonaId || ''),
       summarizerName: String(meta.summarizerName || ''),
       updatedAt: Date.now(),

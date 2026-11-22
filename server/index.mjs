@@ -11,7 +11,7 @@ import { dirname, extname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { RunnerHub } from './runner-hub.mjs';
-import { redactSecrets } from './security.mjs';
+import { getAutoNodeDir, redactSecrets } from './security.mjs';
 import {
   applyShadowToSource,
   computeShadowDiff,
@@ -286,6 +286,8 @@ async function buildCompactStateForApp(activeSessionId = '', personaId = '') {
     quota,
     userProfile: store.getUserProfile(),
     defaultPermissions: store.getDefaultPermissions(),
+    extraPath: store.getExtraPath(),
+    autoNodeDir: getAutoNodeDir(),
     availableModels: defaults.models,
     modelReasoningLevels: defaults.modelReasoningLevels,
     personas: store.listPersonas().map(sanitizePersonaForApp),
@@ -820,6 +822,12 @@ registerAppTool(
   async ({ shadowId, force = false }) => {
     const shadow = store.getShadow(shadowId);
     if (!shadow) return jsonResult({ ok: false, error: `未找到影子副本: ${shadowId}` });
+    if (hub.hasRunningJobForShadow(shadowId)) {
+      return jsonResult({
+        ok: false,
+        error: '该影子副本仍有任务正在运行，请等待完成或先点击停止后再应用写回',
+      });
+    }
     const res = applyShadowToSource(store, shadow, { force });
     return jsonResult({ ok: Boolean(res.applied), ...res });
   }
@@ -834,11 +842,12 @@ registerAppTool(
     inputSchema: {
       backupId: z.string().optional(),
       sourceDir: z.string().optional(),
+      force: z.boolean().optional(),
     },
     _meta: APP_ONLY_META,
   },
-  async ({ backupId = '', sourceDir = '' } = {}) => {
-    const res = undoLastApply(store, { backupId, sourceDir });
+  async ({ backupId = '', sourceDir = '', force = false } = {}) => {
+    const res = undoLastApply(store, { backupId, sourceDir, force });
     return jsonResult({ ok: Boolean(res.undone), ...res });
   }
 );
@@ -853,6 +862,9 @@ registerAppTool(
     _meta: APP_ONLY_META,
   },
   async ({ shadowId }) => {
+    if (hub.hasRunningJobForShadow(shadowId)) {
+      throw new Error('该影子副本仍有任务正在运行，请等待完成或先点击停止后再丢弃');
+    }
     const res = discardShadow(store, shadowId);
     return jsonResult({ ok: true, ...res });
   }
@@ -962,18 +974,24 @@ registerAppTool(
   server,
   'app_save_default_permissions',
   {
-    title: '保存全局默认权限',
-    description: 'UI 专用：保存三组全局默认权限胶囊（fileScope / commandPolicy / networkPolicy）。',
+    title: '保存全局默认设置与附加 PATH',
+    description: 'UI 专用：保存三组全局默认权限胶囊（fileScope / commandPolicy / networkPolicy）及附加 PATH 环境变量。',
     inputSchema: {
       fileScope: z.enum(['read-only', 'shadow', 'direct']).optional(),
       commandPolicy: z.enum(['auto', 'disabled']).optional(),
       networkPolicy: z.enum(['allow', 'deny']).optional(),
+      extraPath: z.string().max(4096).optional(),
     },
     _meta: APP_ONLY_META,
   },
   async (args = {}) => {
     const defaultPermissions = store.saveDefaultPermissions(args);
-    return jsonResult({ ok: true, defaultPermissions });
+    return jsonResult({
+      ok: true,
+      defaultPermissions,
+      extraPath: store.getExtraPath(),
+      autoNodeDir: getAutoNodeDir(),
+    });
   }
 );
 

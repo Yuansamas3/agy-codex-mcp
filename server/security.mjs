@@ -6,7 +6,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 const SAFE_BITMAP_DATA_URL_RE =
   /^data:image\/(?:png|jpeg|jpg|webp|gif|bmp);base64,[A-Za-z0-9+/=\s]+$/i;
@@ -239,4 +239,88 @@ export function atomicWriteFileSync(targetPath, content, { maxRetries = 6 } = {}
     // ignore cleanup error
   }
   throw lastErr;
+}
+
+export function getAutoNodeDir() {
+  try {
+    return process.execPath ? dirname(resolve(process.execPath)) : '';
+  } catch {
+    return '';
+  }
+}
+
+export function parseExtraPathEntries(extraPath = '', platform = process.platform) {
+  const raw = String(extraPath || '');
+  if (!raw.trim()) return [];
+  const sepRe = platform === 'win32' ? /[\r\n;]+/ : /[\r\n;:]+/;
+  const out = [];
+  for (const part of raw.split(sepRe)) {
+    const cleaned = part.trim().replace(/^["']+|["']+$/g, '').trim();
+    if (!cleaned || cleaned.includes('\0')) continue;
+    out.push(cleaned);
+  }
+  return out;
+}
+
+/**
+ * Builds a clean child-process environment with:
+ *  1. User-configured `extraPath` directories prepended first (highest priority);
+ *  2. Current Node.js binary directory (`dirname(process.execPath)`) guaranteed in PATH;
+ *  3. Single canonical `Path`/`PATH` key (no duplicate case-variant collisions on Windows).
+ */
+export function buildAugmentedEnv(baseEnv = process.env, extraPath = '', extraVars = {}) {
+  const env = { ...(baseEnv || {}) };
+  const isWin = process.platform === 'win32';
+  const pathSep = isWin ? ';' : delimiter || ':';
+
+  const pathKeys = Object.keys(env).filter((k) => k.toLowerCase() === 'path');
+  const primaryKey = pathKeys[0] || (isWin ? 'Path' : 'PATH');
+  const existingRaw = pathKeys.map((k) => env[k] || '').filter(Boolean).join(pathSep);
+  for (const k of pathKeys) {
+    if (k !== primaryKey) delete env[k];
+  }
+
+  const seen = new Set();
+  const merged = [];
+  const pushUnique = (dir) => {
+    const trimmed = String(dir || '').trim();
+    if (!trimmed || trimmed.includes('\0')) return;
+    const normKey = isWin ? trimmed.replace(/[\\/]+$/, '').toLowerCase() : trimmed.replace(/\/+$/, '');
+    if (!normKey || seen.has(normKey)) return;
+    seen.add(normKey);
+    merged.push(trimmed);
+  };
+
+  for (const p of parseExtraPathEntries(extraPath)) pushUnique(p);
+  const autoNode = getAutoNodeDir();
+  if (autoNode) pushUnique(autoNode);
+  for (const p of existingRaw.split(pathSep)) pushUnique(p);
+
+  env[primaryKey] = merged.join(pathSep);
+  if (extraVars && typeof extraVars === 'object') {
+    Object.assign(env, extraVars);
+  }
+  return env;
+}
+
+/**
+ * Compares the normalized `protocol://host` origin of two API Base URLs.
+ * Allows path tweaks on the same host (e.g. `/v1` vs `/v1/chat/completions`),
+ * while detecting cross-host switches so old credentials are never sent to a new host.
+ */
+export function isSameEndpointHost(urlA, urlB) {
+  const extractOrigin = (u) => {
+    let s = String(u || '').trim();
+    if (!s) return '';
+    if (!/^https?:\/\//i.test(s)) s = `https://${s}`;
+    try {
+      const parsed = new URL(s);
+      return `${parsed.protocol.toLowerCase()}//${parsed.host.toLowerCase()}`;
+    } catch {
+      return '';
+    }
+  };
+  const a = extractOrigin(urlA);
+  const b = extractOrigin(urlB);
+  return Boolean(a && b && a === b);
 }

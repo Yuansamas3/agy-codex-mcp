@@ -33,6 +33,9 @@ import {
 } from './prompt-composer.mjs';
 import { RunnerHub } from './runner-hub.mjs';
 import {
+  buildAugmentedEnv,
+  getAutoNodeDir,
+  isSameEndpointHost,
   isSameOrInsideRealPath,
   redactSecrets,
 } from './security.mjs';
@@ -1428,6 +1431,7 @@ try {
   const { job: cJob1, session: cSess } = hub.startJob({
     sourceDir,
     personaId: 'codex-default',
+    model: 'gpt-6-luna',
     sandbox: 'workspace-write',
     reasoningEffort: 'low',
     createdBy: 'hakimi',
@@ -1445,10 +1449,11 @@ try {
   const { job: cJob2 } = hub.startJob({
     sourceDir,
     sessionId: cSess.id,
+    model: 'gpt-6-luna',
     sandbox: 'workspace-write',
     reasoningEffort: 'low',
     createdBy: 'boss',
-    prompt: '在 codex_note.md 末尾追加一行「回归通过」并简短回复。',
+    prompt: '请直接修改文件（使用 apply_patch 或 UTF-8 写入），在 codex_note.md 末尾追加一行「回归通过」，完成后简短回复。',
   });
   const cDone2 = await hub.waitForJob(cJob2.id, 120);
   assert.equal(cDone2.status, 'completed', `Codex Turn 2 failed: ${cDone2.error}`);
@@ -1480,6 +1485,7 @@ try {
   const { job: cTurboJob } = hub.startJob({
     sourceDir: turboDir,
     personaId: 'codex-default',
+    model: 'gpt-6-luna',
     sandbox: 'turbo-direct',
     shadowLimits: { maxFiles: 1 },
     reasoningEffort: 'low',
@@ -1823,7 +1829,97 @@ try {
 
   pass('7. 红队安全审计全套断言（proj_evil 前缀碰撞 / 软链与 Junction 越界全链路拦截 / Git 参数注入 / 随机 Nonce 防 XSS / SVG 头像与附件拦截 / API Key 零泄露 / 状态裁剪防膨胀 / 零私人路径启动器实测）');
 
-  console.log('\n🎉 ALL SIDEDESK v1.1.0 BACKEND + QUOTA + RED-TEAM E2E TESTS PASSED!');
+  // -------------------------------------------------------------------------
+  // 8. v0.1.1 Hardening + Global Extra PATH & Auto-Node PATH Injection
+  // -------------------------------------------------------------------------
+  {
+    // 8a: Auto-Node PATH + extraPath priority + single canonical Path/PATH key
+    const autoNode = getAutoNodeDir();
+    assert.ok(autoNode && existsSync(autoNode), 'getAutoNodeDir must resolve running Node directory');
+    const augEnv = buildAugmentedEnv(
+      { Path: 'C:\\Windows\\System32', PATH: 'C:\\Windows' },
+      'D:\\custom-tools-alpha\nD:\\custom-tools-beta;D:\\custom-tools-alpha'
+    );
+    const pathKeys = Object.keys(augEnv).filter((k) => k.toLowerCase() === 'path');
+    assert.equal(pathKeys.length, 1, 'Must deduplicate case-variant Path/PATH keys');
+    const mergedParts = augEnv[pathKeys[0]].split(process.platform === 'win32' ? ';' : ':');
+    assert.equal(mergedParts[0], 'D:\\custom-tools-alpha', 'extraPath entry #1 must take highest priority');
+    assert.equal(mergedParts[1], 'D:\\custom-tools-beta', 'extraPath entry #2 must preserve order');
+    assert.ok(
+      mergedParts.some((p) => p.toLowerCase() === autoNode.toLowerCase()),
+      'Auto Node dir must be present in merged PATH'
+    );
+
+    // Persist extraPath via store.saveDefaultPermissions
+    store.saveDefaultPermissions({ extraPath: 'D:\\my-extra-cli;D:\\my-python' });
+    assert.equal(store.getExtraPath(), 'D:\\my-extra-cli;D:\\my-python');
+
+    // 8b: edit_file `$&` / `$$` literal replacement safety (no regex replacement corruption)
+    const dollarDir = join(rootTmp, 'dollar_proj');
+    mkdirSync(join(dollarDir, 'bin'), { recursive: true });
+    writeFileSync(join(dollarDir, 'price.js'), 'const label = "OLD";\n', 'utf8');
+    writeFileSync(join(dollarDir, 'bin', 'cli.js'), '#!/usr/bin/env node\nconsole.log(1);\n', 'utf8');
+    const dollarShadow = createShadowCopy(store, dollarDir);
+    assert.equal(
+      existsSync(join(dollarShadow.workDir, 'bin', 'cli.js')),
+      true,
+      'Non-.NET bin/ scripts directory must NOT be skipped in shadow copies'
+    );
+    const repOut = executeShadowTool(dollarShadow.workDir, 'workspace-write', 'edit_file', {
+      path: 'price.js',
+      old_text: 'OLD',
+      new_text: 'cost: $& / $$ / $1',
+    });
+    assert.equal(repOut.ok, true);
+    assert.equal(
+      readFileSync(join(dollarShadow.workDir, 'price.js'), 'utf8'),
+      'const label = "cost: $& / $$ / $1";\n'
+    );
+
+    // 8c: Even if an agent runs `git commit` inside shadow.workDir, baseCommit diff STILL catches changes!
+    spawnSync('git', ['add', '-A'], { cwd: dollarShadow.workDir, windowsHide: true });
+    spawnSync('git', ['commit', '-q', '-m', 'agent-internal-commit'], {
+      cwd: dollarShadow.workDir,
+      windowsHide: true,
+    });
+    const postCommitDiff = computeShadowDiff(dollarShadow);
+    assert.equal(postCommitDiff.hasChanges, true, 'baseCommit diff must catch committed shadow edits');
+    assert.equal(postCommitDiff.files.length, 1);
+    assert.equal(postCommitDiff.files[0].path, 'price.js');
+
+    // 8d: Apply -> manual user edit -> undoLastApply blocks clobbering unless force=true
+    const appRes = applyShadowToSource(store, dollarShadow);
+    assert.equal(appRes.applied, true);
+    writeFileSync(join(dollarDir, 'price.js'), 'const label = "USER_MANUAL_EDIT";\n', 'utf8');
+    const safeUndo = undoLastApply(store, { backupId: appRes.backupId });
+    assert.equal(safeUndo.undone, false);
+    assert.equal(safeUndo.conflict, true, 'Undo must pause when user manually edited file after Apply');
+    assert.equal(
+      readFileSync(join(dollarDir, 'price.js'), 'utf8'),
+      'const label = "USER_MANUAL_EDIT";\n'
+    );
+    const forcedUndo = undoLastApply(store, { backupId: appRes.backupId, force: true });
+    assert.equal(forcedUndo.undone, true);
+    assert.equal(readFileSync(join(dollarDir, 'price.js'), 'utf8'), 'const label = "OLD";\n');
+
+    // 8e: Cross-host Base URL switch blocks silent credential leak on both testConnection & savePersona
+    assert.equal(isSameEndpointHost('https://api.deepseek.com', 'https://api.deepseek.com/v1'), true);
+    assert.equal(isSameEndpointHost('https://api.deepseek.com', 'https://evil.example.com/v1'), false);
+    const crossHostTest = await hub.testOpenAiConnection({
+      baseUrl: 'http://127.0.0.1:65530/v1',
+      model: 'deepseek-chat',
+      existingPersonaId: 'ds-r1',
+    });
+    assert.equal(crossHostTest.ok, false);
+    assert.match(crossHostTest.error, /接口域名已变更/);
+    assert.throws(
+      () => store.savePersona({ id: 'ds-r1', baseUrl: 'https://other-host.example.com/v1', apiKey: '' }),
+      /接口域名已变更/
+    );
+  }
+  pass('8. v0.1.1 自审加固全套断言（全局附加 PATH + 自动补 Node 路径 / $& 字面替换 / bin 脚本保留 / 副本内 commit 防隐身 / 撤销防覆盖手动编辑 / 跨域名防旧 Key 泄漏）');
+
+  console.log('\n🎉 ALL SIDEDESK v0.1.1 BACKEND + QUOTA + RED-TEAM E2E TESTS PASSED!');
 } finally {
   mockServer.close();
   try {

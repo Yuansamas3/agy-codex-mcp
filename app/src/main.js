@@ -245,6 +245,8 @@ const el = {
   upSave: document.getElementById('up-save'),
 
   globalPermDesc: document.getElementById('global-perm-desc'),
+  dpExtraPath: document.getElementById('dp-extra-path'),
+  dpNodePathHint: document.getElementById('dp-node-path-hint'),
   dpSave: document.getElementById('dp-save'),
 
   // New Topic Modal
@@ -741,21 +743,40 @@ function autoResizeTextarea() {
   el.draftInput.style.height = `${next}px`;
 }
 
+let pendingDraftSnapshot = null;
+
+function flushPendingDraftSave() {
+  if (!draftTimer || !pendingDraftSnapshot) return;
+  clearTimeout(draftTimer);
+  draftTimer = null;
+  const snap = pendingDraftSnapshot;
+  pendingDraftSnapshot = null;
+  callAppTool('app_save_draft', snap).catch(() => {});
+}
+
 function scheduleDraftSave() {
   draftDirty = true;
   el.draftHint.textContent = '···';
   autoResizeTextarea();
   syncSendButtonState();
   clearTimeout(draftTimer);
+  const snap = {
+    key: currentDraftKey(),
+    text: el.draftInput.value,
+    sourceDir: currentSourceDir,
+  };
+  pendingDraftSnapshot = snap;
   draftTimer = setTimeout(async () => {
-    const key = currentDraftKey();
-    const text = el.draftInput.value;
+    draftTimer = null;
+    pendingDraftSnapshot = null;
     try {
-      await callAppTool('app_save_draft', { key, text, sourceDir: currentSourceDir });
-      draftDirty = false;
-      el.draftHint.textContent = text ? '已存' : '';
+      await callAppTool('app_save_draft', snap);
+      if (currentDraftKey() === snap.key) {
+        draftDirty = false;
+        el.draftHint.textContent = snap.text ? '已存' : '';
+      }
     } catch {
-      el.draftHint.textContent = '';
+      if (currentDraftKey() === snap.key) el.draftHint.textContent = '';
     }
   }, 420);
 }
@@ -1197,7 +1218,7 @@ function renderMemberStrip(st) {
   const key =
     selectedPersonaId +
     '|' +
-    personas.map((p) => `${p.id}:${p.name}:${p.avatar?.slice(0, 24)}`).join(',');
+    personas.map((p) => `${p.id}:${p.name}:${p.role || ''}:${p.avatar?.slice(0, 24)}`).join(',');
   if (key === lastMemberStripKey) return;
   lastMemberStripKey = key;
 
@@ -1217,7 +1238,7 @@ function renderMemberStrip(st) {
           type="button"
           class="member-chip ${active ? 'active' : ''}"
           data-member-pick="${esc(p.id)}"
-          title="${esc(p.name)}${p.role ? ` · ${p.role}` : ''}"
+          title="${esc(p.name)}${p.role ? ` · ${esc(p.role)}` : ''}"
         >
           <span class="avatar-circle">${renderAvatarInner(p.avatar)}</span>
           ${active ? `<span class="member-chip-label">${esc(p.name)} 的工位</span>` : ''}
@@ -1235,6 +1256,7 @@ function renderMemberStrip(st) {
 }
 
 function switchToMemberWorkstation(personaId) {
+  flushPendingDraftSave();
   selectedPersonaId = personaId;
   composerOverrideActive = false;
   lastMemberStripKey = '';
@@ -1884,9 +1906,11 @@ async function fetchDiffForShadow(shadowId, force = false) {
   try {
     const res = await callAppTool('app_get_diff', { shadowId });
     if (!res.ok) throw new Error(res.error || '获取 Diff 失败');
+    const shMeta = serverState?.pendingShadows?.find((x) => x.id === shadowId);
     diffCache.set(shadowId, {
       diff: res.diff,
       fetchedAt: Date.now(),
+      shadowUpdatedAt: shMeta?.updatedAt || Date.now(),
       loading: false,
       error: null,
       conflicts: null,
@@ -1942,7 +1966,9 @@ function renderReviewView(st, force = false) {
   el.reviewList.innerHTML = '';
   for (const sh of pending) {
     const entry = diffCache.get(sh.id);
-    if (!entry) fetchDiffForShadow(sh.id, false);
+    if (!entry || (sh.updatedAt && sh.updatedAt > (entry.shadowUpdatedAt || 0) && !entry.loading)) {
+      fetchDiffForShadow(sh.id, Boolean(entry));
+    }
 
     const card = document.createElement('div');
     card.className = 'review-card';
@@ -2135,9 +2161,19 @@ async function handleApply(shadowId, force) {
   }
 }
 
+const undoForceArmed = new Set();
+
 async function handleUndo(backupId) {
   try {
-    const res = await callAppTool('app_undo_last_apply', { backupId });
+    const force = undoForceArmed.has(backupId);
+    const res = await callAppTool('app_undo_last_apply', { backupId, force });
+    if (res.conflict && !force) {
+      undoForceArmed.add(backupId);
+      setTimeout(() => undoForceArmed.delete(backupId), 6000);
+      showToast(`${res.message}（6 秒内再点一次「撤销上次应用」将强制还原）`);
+      return;
+    }
+    undoForceArmed.delete(backupId);
     if (!res.undone) {
       showToast(res.message || '没有可撤销的备份');
       return;
@@ -2286,8 +2322,16 @@ function openSettingsModal(initialTab = 'personas', targetPersonaId = '') {
   }
   syncThemeToggleUI(resolveEffectiveTheme());
 
-  // Populate Global Default Permissions tab
+  // Populate Global Settings tab (Default Permissions + Extra PATH)
   setPermState('global', serverState.defaultPermissions || PRESET_SAFE);
+  if (el.dpExtraPath) {
+    el.dpExtraPath.value = serverState.extraPath || '';
+  }
+  if (el.dpNodePathHint) {
+    el.dpNodePathHint.textContent = serverState.autoNodeDir
+      ? `✓ 已自动补入当前 Node 路径：${serverState.autoNodeDir}（上方填写的路径优先级最高，Codex CLI 与 API 命令工具均生效）`
+      : '上方填写的路径会优先注入子进程 PATH，Codex CLI 与 API 命令工具均生效';
+  }
 
   setSettingsTab(initialTab);
   el.settingsModal.classList.remove('hidden');
@@ -2609,6 +2653,7 @@ function renderTopicManagerList() {
     `;
 
     card.querySelector('[data-tm-switch]')?.addEventListener('click', (e) => {
+      flushPendingDraftSave();
       const sid = e.currentTarget.dataset.tmSwitch;
       const pid = e.currentTarget.dataset.tmPersona;
       if (pid && pid !== selectedPersonaId) {
@@ -3024,7 +3069,15 @@ el.pmSave.addEventListener('click', async () => {
           : 0,
       systemPrompt: el.pmPrompt.value,
     });
-    selectedPersonaId = res.persona?.id || selectedPersonaId;
+    const nextPid = res.persona?.id || selectedPersonaId;
+    if (nextPid !== selectedPersonaId) {
+      flushPendingDraftSave();
+      selectedPersonaId = nextPid;
+      const memberSessions = (serverState?.sessions || []).filter((s) => s.personaId === nextPid);
+      activeSessionId = memberSessions.length > 0 ? memberSessions[0].id : '__none__';
+      draftDirty = false;
+      draftHydratedKey = '';
+    }
     composerOverrideActive = false;
     lastMemberStripKey = '';
     lastMsgRenderKey = '';
@@ -3078,11 +3131,14 @@ el.upSave.addEventListener('click', async () => {
 el.dpSave.addEventListener('click', async () => {
   el.dpSave.disabled = true;
   try {
-    await callAppTool('app_save_default_permissions', globalModalPerms);
-    showToast('已保存全局默认权限');
+    await callAppTool('app_save_default_permissions', {
+      ...globalModalPerms,
+      extraPath: el.dpExtraPath ? el.dpExtraPath.value.trim() : undefined,
+    });
+    showToast('已保存全局设置');
     await syncState();
   } catch (err) {
-    showToast(`保存默认权限失败: ${err.message}`);
+    showToast(`保存全局设置失败: ${err.message}`);
   } finally {
     el.dpSave.disabled = false;
   }
@@ -3114,6 +3170,7 @@ el.btnDirSave.addEventListener('click', async () => {
 
 // Topic switcher, New Topic modal & Topic Manager modal
 el.ctrlSession.addEventListener('change', () => {
+  flushPendingDraftSave();
   activeSessionId = el.ctrlSession.value || '__none__';
   draftDirty = false;
   draftHydratedKey = '';

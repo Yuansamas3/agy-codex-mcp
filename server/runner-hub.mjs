@@ -1,11 +1,18 @@
+import { resolve } from 'node:path';
 import { CodexRunner } from './codex-runner.mjs';
 import { OpenAiRunner } from './openai-runner.mjs';
 import { CodexQuotaReader } from './quota-reader.mjs';
-import { getContentMessageCount, hasFreshSessionSummary } from './store.mjs';
+import { normalizePathForCompare } from './security.mjs';
+import {
+  getContentMessageCount,
+  getLastContentMessageId,
+  hasFreshSessionSummary,
+} from './store.mjs';
 
 export class RunnerHub {
   constructor(store, { sessionsDir = '' } = {}) {
     this.store = store;
+    this.compressingSessions = new Set();
     this.quotaReader = new CodexQuotaReader({ sessionsDir });
     this.codex = new CodexRunner(store, this.quotaReader);
     if (!sessionsDir) {
@@ -58,6 +65,18 @@ export class RunnerHub {
     return this.openai.testConnection(params);
   }
 
+  hasRunningJobForShadow(shadowId) {
+    if (!shadowId) return false;
+    return this.store.state.jobs.some(
+      (j) =>
+        j &&
+        j.shadowId === shadowId &&
+        (j.status === 'running' ||
+          this.codex.runningJobs.has(j.id) ||
+          this.openai.hasRunningJob(j.id))
+    );
+  }
+
   startJob(args) {
     if (!args?.prompt || !String(args.prompt).trim()) {
       throw new Error('指令 prompt 不能为空');
@@ -67,12 +86,33 @@ export class RunnerHub {
     if (args.sessionId && !session) {
       throw new Error(`未找到副席会话: ${args.sessionId}`);
     }
+    if (session && this.compressingSessions.has(session.id)) {
+      throw new Error('当前话题正在压缩摘要，请稍候完成后再发送消息');
+    }
 
     const persona =
       this.store.getPersona(args.personaId || session?.personaId) ||
       this.store.listPersonas()[0];
     if (!persona) {
       throw new Error('未找到可用的人物卡');
+    }
+
+    // Prevent cross-persona or stale-shadow cross-directory contamination:
+    // - switching persona forks into a clean 1v1 session for that persona;
+    // - switching sourceDir within the same persona keeps the topic history while detaching the old directory's shadowId!
+    if (session) {
+      const personaSwitched = args.personaId && session.personaId && session.personaId !== persona.id;
+      if (personaSwitched) {
+        session = null;
+      } else if (
+        args.sourceDir &&
+        session.sourceDir &&
+        normalizePathForCompare(resolve(args.sourceDir)) !==
+          normalizePathForCompare(resolve(session.sourceDir))
+      ) {
+        session.sourceDir = resolve(args.sourceDir);
+        session.shadowId = null;
+      }
     }
 
     const provider = persona.provider || 'codex-cli';
@@ -133,6 +173,8 @@ export class RunnerHub {
       throw new Error('未找到可用于整理摘要的成员');
     }
 
+    const snapMsgCount = getContentMessageCount(session);
+    const snapLastMsgId = getLastContentMessageId(session);
     const transcript = this.buildSessionTranscript(session);
     const sumPrompt = [
       '请将下面的 1v1 工程协作话题浓缩为一份高密度、结构化的上下文交接摘要（控制在 300~600 字以内），方便新话题或压缩后的续聊直接衔接：',
@@ -156,12 +198,15 @@ export class RunnerHub {
     const meta = this.store.setSessionLatestSummary(session.id, summaryText, {
       summarizerPersonaId: summarizer.id,
       summarizerName: summarizer.name,
+      messageCountAtSummary: snapMsgCount,
+      lastMessageId: snapLastMsgId,
     });
     return {
       ok: true,
       reused: false,
       summary: meta.summary,
       meta,
+      snapLastMsgId,
     };
   }
 
@@ -172,6 +217,9 @@ export class RunnerHub {
   async compressSessionInPlaceAsync({ sessionId, summarizerPersonaId = '' } = {}) {
     const session = this.store.getSession(sessionId);
     if (!session) throw new Error(`未找到话题: ${sessionId}`);
+    if (this.compressingSessions.has(sessionId)) {
+      throw new Error('当前话题正在压缩摘要，请勿重复点击');
+    }
     const running = this.store.state.jobs.find(
       (j) => j.sessionId === sessionId && j.status === 'running'
     );
@@ -179,38 +227,48 @@ export class RunnerHub {
       throw new Error('当前话题正在执行任务，请等待完成或先中止后再压缩');
     }
 
-    const res = await this.summarizeSessionAsync({
-      sessionId,
-      summarizerPersonaId,
-      reuseIfFresh: false,
-    });
+    const beforeLastId = getLastContentMessageId(session);
+    this.compressingSessions.add(sessionId);
+    try {
+      const res = await this.summarizeSessionAsync({
+        sessionId,
+        summarizerPersonaId,
+        reuseIfFresh: false,
+      });
 
-    session.codexThreadId = null;
-    session.openaiMessages = [];
-    session.contextUsage = null;
-    session.inheritedSummary = {
-      sourceSessionId: session.id,
-      sourceTitle: session.title,
-      summary: res.summary,
-      updatedAt: Date.now(),
-    };
-    session.anchorState = {
-      digest: String(session.anchorState?.digest || ''),
-      turnsSinceSync: 0,
-      charsSinceSync: 0,
-      forceSync: true,
-    };
-    this.store.appendSessionMessage(session.id, {
-      role: 'system',
-      text: `已由「${res.meta.summarizerName || '成员'}」原地压缩上下文摘要并重置底层长线程，后续对话将轻装继续。`,
-    });
-    this.store.flush();
-    return {
-      ok: true,
-      summary: res.summary,
-      meta: res.meta,
-      session,
-    };
+      if (getLastContentMessageId(session) !== beforeLastId) {
+        throw new Error('压缩期间话题产生了新消息，已保留完整历史（未覆盖新消息）');
+      }
+
+      session.codexThreadId = null;
+      session.openaiMessages = [];
+      session.contextUsage = null;
+      session.inheritedSummary = {
+        sourceSessionId: session.id,
+        sourceTitle: session.title,
+        summary: res.summary,
+        updatedAt: Date.now(),
+      };
+      session.anchorState = {
+        digest: String(session.anchorState?.digest || ''),
+        turnsSinceSync: 0,
+        charsSinceSync: 0,
+        forceSync: true,
+      };
+      this.store.appendSessionMessage(session.id, {
+        role: 'system',
+        text: `已由「${res.meta.summarizerName || '成员'}」原地压缩上下文摘要并重置底层长线程，后续对话将轻装继续。`,
+      });
+      this.store.flush();
+      return {
+        ok: true,
+        summary: res.summary,
+        meta: res.meta,
+        session,
+      };
+    } finally {
+      this.compressingSessions.delete(sessionId);
+    }
   }
 
   waitForJob(jobId, timeoutSec = 0) {

@@ -44,7 +44,6 @@ export const DEFAULT_SKIP_DIRS = new Set([
   '.vscode',
   'out',
   'coverage',
-  'bin',
   'obj',
   '.pytest_cache',
   '.mypy_cache',
@@ -197,7 +196,10 @@ export function prescanSourceDir(sourceDir, opts = {}) {
       }
 
       if (lst.isDirectory()) {
-        if (skipDirs.has(entry.name.toLowerCase())) {
+        const lowerName = entry.name.toLowerCase();
+        // Skip heavy build dirs + .NET `bin` folders sitting alongside `obj` (while preserving Node/shell `bin/` scripts!)
+        const isDotNetBin = lowerName === 'bin' && existsSync(join(currentAbs, 'obj'));
+        if (skipDirs.has(lowerName) || isDotNetBin) {
           skippedDirs.push(childRel);
           continue;
         }
@@ -247,11 +249,13 @@ function initLocalBaselineGit(workDir) {
   runGit(workDir, ['config', 'user.email', 'shadow@sidedesk.local']);
   runGit(workDir, ['config', 'core.autocrlf', 'false']);
   runGit(workDir, ['config', 'core.quotepath', 'false']);
-  runGit(workDir, ['add', '-A', '--', '.']);
+  runGit(workDir, ['add', '-f', '-A', '--', '.']);
   const r2 = runGit(workDir, ['commit', '--allow-empty', '-q', '-m', 'sidedesk-baseline']);
   if (r2.status !== 0) {
     throw new Error(`影子副本提交基线失败: ${r2.stderr || r2.stdout}`);
   }
+  const rev = runGit(workDir, ['rev-parse', 'HEAD']);
+  return rev.status === 0 ? (rev.stdout || '').trim() : '';
 }
 
 /**
@@ -284,12 +288,13 @@ export function createShadowCopy(store, sourceDir, opts = {}) {
     };
   }
 
-  initLocalBaselineGit(workDir);
+  const baseCommit = initLocalBaselineGit(workDir);
 
   const manifest = {
     id: shadowId,
     sourceDir: scan.sourceDir,
     workDir,
+    baseCommit,
     createdAt: Date.now(),
     updatedAt: Date.now(),
     fileCount: scan.fileCount,
@@ -305,6 +310,7 @@ export function createShadowCopy(store, sourceDir, opts = {}) {
     sourceDir: scan.sourceDir,
     workDir,
     manifestFile,
+    baseCommit,
     status: 'active', // 'active' | 'applied' | 'discarded'
     fileCount: scan.fileCount,
     totalBytes: scan.totalBytes,
@@ -329,11 +335,13 @@ async function initLocalBaselineGitAsync(workDir) {
   await runGitAsync(workDir, ['config', 'user.email', 'shadow@sidedesk.local']);
   await runGitAsync(workDir, ['config', 'core.autocrlf', 'false']);
   await runGitAsync(workDir, ['config', 'core.quotepath', 'false']);
-  await runGitAsync(workDir, ['add', '-A', '--', '.']);
+  await runGitAsync(workDir, ['add', '-f', '-A', '--', '.']);
   const r2 = await runGitAsync(workDir, ['commit', '--allow-empty', '-q', '-m', 'sidedesk-baseline']);
   if (r2.status !== 0) {
     throw new Error(`影子副本提交基线失败: ${r2.stderr || r2.stdout}`);
   }
+  const rev = await runGitAsync(workDir, ['rev-parse', 'HEAD']);
+  return rev.status === 0 ? (rev.stdout || '').trim() : '';
 }
 
 /**
@@ -384,13 +392,14 @@ export async function createShadowCopyAsync(store, sourceDir, opts = {}) {
     }
 
     checkAborted();
-    await initLocalBaselineGitAsync(workDir);
+    const baseCommit = await initLocalBaselineGitAsync(workDir);
     checkAborted();
 
     const manifest = {
       id: shadowId,
       sourceDir: scan.sourceDir,
       workDir,
+      baseCommit,
       createdAt: Date.now(),
       updatedAt: Date.now(),
       fileCount: scan.fileCount,
@@ -406,6 +415,7 @@ export async function createShadowCopyAsync(store, sourceDir, opts = {}) {
       sourceDir: scan.sourceDir,
       workDir,
       manifestFile,
+      baseCommit,
       status: 'active',
       fileCount: scan.fileCount,
       totalBytes: scan.totalBytes,
@@ -493,6 +503,41 @@ export function computeShadowDiff(shadow) {
     throw new Error('影子副本目录不存在或已被丢弃');
   }
 
+  let baseRef = shadow.baseCommit || '';
+  if (!baseRef && shadow.manifestFile && existsSync(shadow.manifestFile)) {
+    try {
+      baseRef = loadShadowManifest(shadow)?.baseCommit || '';
+    } catch {
+      baseRef = '';
+    }
+  }
+  const diffRef = baseRef || 'HEAD';
+
+  const entries = [];
+
+  // 1) Catch ANY committed changes since baseline (even if the AI ran `git commit` inside the shadow workspace!)
+  const committedDiff = runGit(shadow.workDir, ['diff', '--name-status', '-z', diffRef, '--']);
+  if (committedDiff.status === 0 && committedDiff.stdout) {
+    const cTokens = committedDiff.stdout.split('\0').filter((t) => t.length > 0);
+    for (let i = 0; i < cTokens.length; i++) {
+      const code = cTokens[i];
+      const p1 = cTokens[++i] || '';
+      if (!p1) continue;
+      if (code.startsWith('R') || code.startsWith('C')) {
+        const p2 = cTokens[++i] || '';
+        entries.push({ status: 'deleted', path: p1 });
+        if (p2) entries.push({ status: 'added', path: p2 });
+      } else if (code.startsWith('A')) {
+        entries.push({ status: 'added', path: p1 });
+      } else if (code.startsWith('D')) {
+        entries.push({ status: 'deleted', path: p1 });
+      } else {
+        entries.push({ status: 'modified', path: p1 });
+      }
+    }
+  }
+
+  // 2) Catch working-tree & untracked file changes
   const stRes = runGit(shadow.workDir, ['status', '--porcelain=v1', '-uall', '-z', '--']);
   if (stRes.status !== 0) {
     throw new Error(`影子副本状态检测失败: ${stRes.stderr || stRes.stdout}`);
@@ -500,7 +545,6 @@ export function computeShadowDiff(shadow) {
 
   const raw = stRes.stdout || '';
   const tokens = raw.split('\0').filter((t) => t.length > 0);
-  const entries = [];
 
   for (let i = 0; i < tokens.length; i++) {
     const tok = tokens[i];
@@ -576,7 +620,7 @@ export function computeShadowDiff(shadow) {
         '-c',
         'core.quotepath=false',
         'diff',
-        'HEAD',
+        diffRef,
         '--',
         relPosix,
       ]);
@@ -789,6 +833,7 @@ export function applyShadowToSource(store, shadow, { force = false } = {}) {
     }
   }
 
+  const postApplyHashes = {};
   const backupMeta = {
     id: backupId,
     shadowId: shadow.id,
@@ -798,6 +843,7 @@ export function applyShadowToSource(store, shadow, { force = false } = {}) {
     addedFiles,
     modifiedFiles,
     deletedFiles,
+    postApplyHashes,
     undone: false,
     createdAt: Date.now(),
     undoneAt: null,
@@ -805,49 +851,108 @@ export function applyShadowToSource(store, shadow, { force = false } = {}) {
   writeFileSync(join(backupRoot, 'backup.json'), JSON.stringify(backupMeta, null, 2), 'utf8');
 
   const manifest = loadShadowManifest(shadow);
-  for (const f of diff.files) {
-    const origChecked = assertRealPathInsideRoot(shadow.sourceDir, join(shadow.sourceDir, ...f.path.split('/')), {
-      allowMissingLeaf: true,
-      rejectSymlink: true,
-      label: '原工程目录',
-    });
-    const absOrig = origChecked.absPath;
-
-    if (f.status === 'deleted') {
-      if (origChecked.exists) {
-        const curStat = lstatNoThrow(absOrig);
-        if (curStat?.isSymbolicLink()) {
-          throw new Error(`路径越界拦截：拒绝删除符号链接 (${f.path})`);
-        }
-        if (curStat) unlinkSync(absOrig);
-      }
-      delete manifest.files[f.path];
-    } else {
-      const workChecked = assertRealPathInsideRoot(shadow.workDir, join(shadow.workDir, ...f.path.split('/')), {
-        allowMissingLeaf: false,
-        rejectSymlink: true,
-        label: '影子副本目录',
-      });
-      if (!workChecked.stat?.isFile()) {
-        throw new Error(`安全拦截：影子变更项不是普通文件 (${f.path})`);
-      }
-      mkdirSync(dirname(absOrig), { recursive: true });
-      // TOCTOU re-check right before writing into sourceDir
-      const finalOrig = assertRealPathInsideRoot(shadow.sourceDir, absOrig, {
+  const appliedOps = [];
+  try {
+    for (const f of diff.files) {
+      const origChecked = assertRealPathInsideRoot(shadow.sourceDir, join(shadow.sourceDir, ...f.path.split('/')), {
         allowMissingLeaf: true,
         rejectSymlink: true,
         label: '原工程目录',
       });
-      copyFileSync(workChecked.absPath, finalOrig.absPath);
-      manifest.files[f.path] = {
-        sha256: sha256File(finalOrig.absPath),
-        size: statSync(finalOrig.absPath).size,
-      };
+      const absOrig = origChecked.absPath;
+
+      if (f.status === 'deleted') {
+        if (origChecked.exists) {
+          const curStat = lstatNoThrow(absOrig);
+          if (curStat?.isSymbolicLink() || curStat?.isDirectory()) {
+            throw new Error(`路径越界拦截：拒绝删除符号链接或目录 (${f.path})`);
+          }
+          if (curStat) {
+            unlinkSync(absOrig);
+            appliedOps.push({
+              kind: 'restore_backup',
+              path: f.path,
+              absOrig,
+              bakPath: join(backupFilesDir, ...f.path.split('/')),
+            });
+          }
+        }
+        delete manifest.files[f.path];
+      } else {
+        const workChecked = assertRealPathInsideRoot(shadow.workDir, join(shadow.workDir, ...f.path.split('/')), {
+          allowMissingLeaf: false,
+          rejectSymlink: true,
+          label: '影子副本目录',
+        });
+        if (!workChecked.stat?.isFile()) {
+          throw new Error(`安全拦截：影子变更项不是普通文件 (${f.path})`);
+        }
+        if (origChecked.exists && origChecked.stat?.isDirectory()) {
+          throw new Error(`冲突拦截：原工程目标路径已存在同名文件夹 (${f.path})`);
+        }
+        mkdirSync(dirname(absOrig), { recursive: true });
+        // TOCTOU re-check right before writing into sourceDir
+        const finalOrig = assertRealPathInsideRoot(shadow.sourceDir, absOrig, {
+          allowMissingLeaf: true,
+          rejectSymlink: true,
+          label: '原工程目录',
+        });
+        const hadPriorBackup = modifiedFiles.includes(f.path);
+        copyFileSync(workChecked.absPath, finalOrig.absPath);
+        appliedOps.push(
+          hadPriorBackup
+            ? {
+                kind: 'restore_backup',
+                path: f.path,
+                absOrig: finalOrig.absPath,
+                bakPath: join(backupFilesDir, ...f.path.split('/')),
+              }
+            : {
+                kind: 'remove_added',
+                path: f.path,
+                absOrig: finalOrig.absPath,
+              }
+        );
+        const writtenSha = sha256File(finalOrig.absPath);
+        postApplyHashes[f.path] = writtenSha;
+        manifest.files[f.path] = {
+          sha256: writtenSha,
+          size: statSync(finalOrig.absPath).size,
+        };
+      }
     }
+  } catch (applyErr) {
+    // Transactional rollback: if file #k failed mid-apply, unwind files #1..#(k-1) so sourceDir stays clean!
+    for (let i = appliedOps.length - 1; i >= 0; i--) {
+      const op = appliedOps[i];
+      try {
+        if (op.kind === 'restore_backup' && existsSync(op.bakPath)) {
+          mkdirSync(dirname(op.absOrig), { recursive: true });
+          copyFileSync(op.bakPath, op.absOrig);
+        } else if (op.kind === 'remove_added' && existsSync(op.absOrig)) {
+          unlinkSync(op.absOrig);
+          cleanupEmptyParentDirs(dirname(op.absOrig), shadow.sourceDir);
+        }
+      } catch {
+        // best-effort rollback
+      }
+    }
+    try {
+      rmSync(backupRoot, { recursive: true, force: true });
+    } catch {
+      // ignore
+    }
+    throw applyErr;
   }
 
-  runGit(shadow.workDir, ['add', '-A', '--', '.']);
+  writeFileSync(join(backupRoot, 'backup.json'), JSON.stringify(backupMeta, null, 2), 'utf8');
+  runGit(shadow.workDir, ['add', '-f', '-A', '--', '.']);
   runGit(shadow.workDir, ['commit', '--allow-empty', '-q', '-m', `sidedesk-applied-${backupId}`]);
+  const newHead = runGit(shadow.workDir, ['rev-parse', 'HEAD']);
+  if (newHead.status === 0 && (newHead.stdout || '').trim()) {
+    shadow.baseCommit = newHead.stdout.trim();
+    manifest.baseCommit = shadow.baseCommit;
+  }
   saveShadowManifest(shadow, manifest);
 
   shadow.status = 'applied';
@@ -910,7 +1015,7 @@ function cleanupEmptyParentDirs(startDir, stopRoot) {
 /**
  * One-click Undo ("撤销上次应用"): restores backed-up modified/deleted files and removes added files.
  */
-export function undoLastApply(store, { backupId = '', sourceDir = '' } = {}) {
+export function undoLastApply(store, { backupId = '', sourceDir = '', force = false } = {}) {
   const backup = backupId
     ? store.getBackup(backupId)
     : store.getLatestUndoableBackup(sourceDir);
@@ -922,10 +1027,61 @@ export function undoLastApply(store, { backupId = '', sourceDir = '' } = {}) {
     return { undone: false, message: `备份 ${backup.id} 已经撤销过` };
   }
 
+  // Pre-check 1: verify all required backup snapshot files still exist on disk before touching sourceDir
+  const restoreTargets = [...(backup.modifiedFiles || []), ...(backup.deletedFiles || [])];
+  for (const relPosix of restoreTargets) {
+    const bakChecked = assertRealPathInsideRoot(
+      backup.backupFilesDir,
+      join(backup.backupFilesDir, ...relPosix.split('/')),
+      { allowMissingLeaf: true, rejectSymlink: true, label: '备份目录' }
+    );
+    if (!bakChecked.exists || !bakChecked.stat?.isFile()) {
+      throw new Error(`撤销阻断：备份文件缺失 (${relPosix})，已取消操作以防半套还原`);
+    }
+  }
+
+  // Pre-check 2: prevent overwriting manual edits made by the user AFTER clicking Apply
+  const postHashes = backup.postApplyHashes;
+  if (!force && postHashes && typeof postHashes === 'object') {
+    const conflicts = [];
+    for (const relPosix of [...(backup.modifiedFiles || []), ...(backup.addedFiles || [])]) {
+      const expectedSha = postHashes[relPosix];
+      if (!expectedSha) continue;
+      const origChecked = assertRealPathInsideRoot(
+        backup.sourceDir,
+        join(backup.sourceDir, ...relPosix.split('/')),
+        { allowMissingLeaf: true, rejectSymlink: true, label: '原工程目录' }
+      );
+      if (!origChecked.exists || !origChecked.stat?.isFile()) {
+        conflicts.push({ path: relPosix, reason: '应用后原文件已被手动删除或移动' });
+      } else if (sha256File(origChecked.absPath) !== expectedSha) {
+        conflicts.push({ path: relPosix, reason: '应用后原文件已被手动修改' });
+      }
+    }
+    for (const relPosix of backup.deletedFiles || []) {
+      const origChecked = assertRealPathInsideRoot(
+        backup.sourceDir,
+        join(backup.sourceDir, ...relPosix.split('/')),
+        { allowMissingLeaf: true, rejectSymlink: true, label: '原工程目录' }
+      );
+      if (origChecked.exists) {
+        conflicts.push({ path: relPosix, reason: '应用删除后该路径又新建了同名文件' });
+      }
+    }
+    if (conflicts.length > 0) {
+      return {
+        undone: false,
+        conflict: true,
+        conflicts,
+        message: `检测到 ${conflicts.length} 个文件在应用后又发生了新改动，已暂停撤销以防覆盖你的手动修改`,
+      };
+    }
+  }
+
   let restoredCount = 0;
   let removedAddedCount = 0;
 
-  for (const relPosix of [...(backup.modifiedFiles || []), ...(backup.deletedFiles || [])]) {
+  for (const relPosix of restoreTargets) {
     const bakChecked = assertRealPathInsideRoot(
       backup.backupFilesDir,
       join(backup.backupFilesDir, ...relPosix.split('/')),

@@ -358,12 +358,17 @@ async function findThreadJsonlFileAsync(sessionsDir, threadId) {
 async function readParsedTailWithFallback(filePath, tailBytes = DEFAULT_TAIL_BYTES) {
   const first = await readTailTextAsync(filePath, tailBytes);
   if (!first) return null;
-  let parsed = parseTokenCountFromJsonlText(first.text, first.mtimeMs);
-  if (first.truncated && !parsed.rateLimits && !parsed.contextUsage && tailBytes < FALLBACK_TAIL_BYTES) {
+  const parsed = parseTokenCountFromJsonlText(first.text, first.mtimeMs);
+  if (first.truncated && (!parsed.rateLimits || !parsed.contextUsage) && tailBytes < FALLBACK_TAIL_BYTES) {
     const wider = await readTailTextAsync(filePath, FALLBACK_TAIL_BYTES);
     if (wider) {
-      parsed = parseTokenCountFromJsonlText(wider.text, wider.mtimeMs);
-      return { ...parsed, mtimeMs: wider.mtimeMs, size: wider.size };
+      const widerParsed = parseTokenCountFromJsonlText(wider.text, wider.mtimeMs);
+      return {
+        rateLimits: parsed.rateLimits || widerParsed.rateLimits || null,
+        contextUsage: parsed.contextUsage || widerParsed.contextUsage || null,
+        mtimeMs: wider.mtimeMs,
+        size: wider.size,
+      };
     }
   }
   return { ...parsed, mtimeMs: first.mtimeMs, size: first.size };

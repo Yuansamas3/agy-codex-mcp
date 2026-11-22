@@ -10,7 +10,7 @@ import {
   composeTurnGuidanceHeader,
   evaluateAnchorSync,
 } from './prompt-composer.mjs';
-import { atomicWriteFileSync, redactSecrets } from './security.mjs';
+import { atomicWriteFileSync, buildAugmentedEnv, redactSecrets } from './security.mjs';
 import {
   computeShadowDiff,
   createShadowCopyAsync,
@@ -508,6 +508,7 @@ export class CodexRunner {
 
   _handleCodexEvent(job, session, evt) {
     if (!evt || typeof evt !== 'object') return;
+    if (job.status === 'aborted') return;
     const type = evt.type;
 
     if (type === 'thread.started' && evt.thread_id) {
@@ -680,7 +681,22 @@ export class CodexRunner {
         ? existingShadow
         : null;
 
-    // Prevent concurrent running jobs on same session, same shadow, or same direct sourceDir
+    // Prevent concurrent or still-stopping child processes on same session, same shadow, or same direct sourceDir
+    const liveStopping = Array.from(this.runningJobs.keys())
+      .map((id) => this.store.getJob(id))
+      .find(
+        (j) =>
+          j &&
+          ((session && j.sessionId === session.id) ||
+            (reusableShadow && j.shadowId === reusableShadow.id) ||
+            (isDirect && j.directMode && j.sourceDir === absSourceDir))
+      );
+    if (liveStopping) {
+      throw new Error(
+        `上一轮进程 (${liveStopping.id.slice(0, 8)}) 正在收尾退出，请稍候片刻再发。`
+      );
+    }
+
     const busyJob = this.store.state.jobs.find(
       (j) =>
         j.status === 'running' &&
@@ -986,7 +1002,7 @@ export class CodexRunner {
         stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true,
         detached: process.platform !== 'win32',
-        env: { ...process.env, NO_COLOR: '1' },
+        env: buildAugmentedEnv(process.env, this.store.getExtraPath(), { NO_COLOR: '1' }),
       });
     } catch (err) {
       finishFailure(`拉起 Codex CLI 失败: ${err.message}`);
@@ -1282,7 +1298,7 @@ export class CodexRunner {
         stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true,
         detached: process.platform !== 'win32',
-        env: { ...process.env, NO_COLOR: '1' },
+        env: buildAugmentedEnv(process.env, this.store.getExtraPath(), { NO_COLOR: '1' }),
       });
 
       const timer = setTimeout(() => {
