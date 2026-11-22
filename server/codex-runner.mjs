@@ -124,7 +124,7 @@ export function buildCodexArgs({
   const commonFlags = ['--skip-git-repo-check', '--json'];
   if (cleanCodexConfig !== false) {
     commonFlags.push('--ignore-user-config');
-    if (process.platform === 'win32' && !direct && effectivePerms.fileScope === 'shadow' && windowsSandbox) {
+    if (process.platform === 'win32' && !direct && windowsSandbox) {
       commonFlags.push('-c', `windows.sandbox="${windowsSandbox}"`);
     }
   }
@@ -946,8 +946,8 @@ export class CodexRunner {
         : [];
 
       const winSandbox =
-        effectiveCleanConfig && !isDirect && effectivePerms.fileScope === 'shadow'
-          ? readCodexUserDefaults().windowsSandbox || ''
+        effectiveCleanConfig && !isDirect
+          ? readCodexUserDefaults().windowsSandbox || 'unelevated'
           : '';
 
       execArgs = buildCodexArgs({

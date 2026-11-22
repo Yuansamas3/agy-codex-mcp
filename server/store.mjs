@@ -4,6 +4,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
@@ -77,7 +78,7 @@ export function permissionsFromSandbox(sandbox = 'workspace-write') {
   if (sandbox === 'read-only') {
     return {
       fileScope: 'read-only',
-      commandPolicy: 'disabled',
+      commandPolicy: 'auto',
       networkPolicy: 'deny',
     };
   }
@@ -453,10 +454,17 @@ const MIME_TO_EXT = {
 
 export class SideDeskStore {
   constructor(dataDir) {
-    this.dataDir =
+    const rawDataDir =
       dataDir ||
       process.env.SIDEDESK_DATA_DIR ||
       join(homedir(), '.gemini', 'antigravity', 'plugin_data', 'sidedesk');
+    mkdirSync(rawDataDir, { recursive: true });
+    // Resolve Junctions / symlinks so codex.exe never rejects `-o` / `-C` with "path contains a reparse point"
+    try {
+      this.dataDir = (realpathSync.native || realpathSync)(rawDataDir);
+    } catch {
+      this.dataDir = rawDataDir;
+    }
     this.stateFile = join(this.dataDir, 'state.json');
     this.jobsLogDir = join(this.dataDir, 'job_logs');
     this.shadowsDir = join(this.dataDir, 'shadows');
